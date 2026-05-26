@@ -1,0 +1,28 @@
+# 模型文件（体积大，不入库）
+models/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# 运行时产物
+output/
+tmp/
+logs/
+*.wav
+*.pcm
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# 系统文件
+.DS_Store
+Thumbs.db

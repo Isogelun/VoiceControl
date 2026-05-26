@@ -1,0 +1,100 @@
+server:
+  host: 0.0.0.0
+  asr_port: 8000
+  nlu_port: 8001
+  service_timeout: 120
+  gpu: false
+
+audio:
+  source: hardware_serial
+
+models:
+  asr: models/asr
+  nlu: models/nlu
+  nlu_tokenizer: nlu/tokenizer
+
+robot:
+  ip: 192.168.8.181
+
+kws:
+  model_dir: models/kws
+
+wake:
+  backend: asr
+  keyword: 你好花花
+  text:
+    - 你好花花
+    - 你好，花花
+    - 花花
+    - 花花，你好
+  audio: audio/xuanxinghuida.mp3
+
+microphone:
+  device:
+  channel: 0
+  level_log_interval: 3
+  denoise: false
+  gain: 1.0
+  noise_calibration_seconds: 1.0
+  noise_gate_multiplier: 2.5
+  noise_gate_min_rms: 120
+  noise_gate_attenuation: 0.15
+
+hardware_serial:
+  port: auto
+  baudrate: 115200
+  reconnect_interval: 3
+  audio_channel: 0
+  audio_queue_size: 200
+  auto_start_audio: true
+  software_wake_fallback: true
+  follow_wake_angle: true
+  follow_wake_beam: true
+  set_wake_keyword: false
+  wake_keyword:
+  wake_threshold: "700"
+  beam_directions:
+    - 60deg
+    - 120deg
+    - 180deg
+    - 240deg
+    - 300deg
+    - 0deg
+  audio_channel_directions:
+    - 60deg
+    - 120deg
+    - 180deg
+    - 240deg
+    - 300deg
+    - 0deg
+  audio_channel_angles:
+    - 60
+    - 120
+    - 180
+    - 240
+    - 300
+    - 0
+  beam_audio_channels:
+    - 0
+    - 1
+    - 2
+    - 3
+    - 4
+    - 5
+
+vad:
+  mode: silence
+  aggressiveness: 2
+  silence_rms: 300
+  silence_multiplier: 2.5
+  silence_timeout_ms: 1800
+  min_speech_ms: 240
+  command_listen_timeout_ms: 8000
+  utterance_pad_ms: 240
+
+command:
+  output_dir: output
+  service_url:
+  service_timeout: 5
+  success_audio: audio/xuanxinghuida.mp3
+  failed_audio: audio/command_failed.wav
