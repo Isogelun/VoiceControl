@@ -1,15 +1,21 @@
 """
-asr/engine.py
+Qwen3-ASR ONNX inference engine.
 
-SenseVoiceSmall ONNX 推理引擎。
-纯推理逻辑，不含 HTTP 服务和 CLI。
+Expected model directory layout:
+- encoder.int4.onnx or encoder.onnx
+- decoder_init.int4.onnx or decoder_init.onnx
+- decoder_step.int4.onnx or decoder_step.onnx
+- embed_tokens.bin
+- tokenizer.json
+- config.json
 """
 
 import io
+import json
+import logging
 import os
 import re
 import time
-import logging
 
 import numpy as np
 import soundfile as sf
@@ -17,72 +23,222 @@ import soundfile as sf
 logger = logging.getLogger(__name__)
 
 SAMPLE_RATE = 16000
-LFR_M, LFR_N = 7, 6
-
-# language / text_norm IDs（来自模型 metadata）
-LANG_IDS = {"auto": 0, "zh": 3, "en": 4, "yue": 7, "ja": 11, "ko": 12}
-WITH_ITN = 14
-WITHOUT_ITN = 15
 
 
-# ─── 模型加载 ───────────────────────────────────────────────────────────────────
-
-def _parse_metadata(sess):
-    raw = sess.get_modelmeta().custom_metadata_map
-    neg_mean = np.array([float(x) for x in raw["neg_mean"].split(",")], dtype=np.float32)
-    inv_stddev = np.array([float(x) for x in raw["inv_stddev"].split(",")], dtype=np.float32)
-    return neg_mean, inv_stddev
-
-
-def load_session(model_dir: str, use_q8: bool = True, num_threads: int = None, use_gpu: bool = False):
-    """加载 ONNX 模型，返回 (session, neg_mean, inv_stddev)"""
+def _providers(use_gpu: bool):
     import onnxruntime as ort
-    if num_threads is None:
-        cores = os.cpu_count() or 4
-        num_threads = min(max(2, cores - 1), 4)
-    model_file = "model_q8.onnx" if use_q8 else "model.onnx"
+
+    if use_gpu and "CUDAExecutionProvider" in ort.get_available_providers():
+        logger.info("Using GPU inference (CUDA)")
+        return ["CUDAExecutionProvider", "CPUExecutionProvider"]
+    if use_gpu:
+        logger.warning("CUDAExecutionProvider is unavailable, falling back to CPU")
+    return ["CPUExecutionProvider"]
+
+
+def _ort_session(path: str, providers, num_threads: int):
+    import onnxruntime as ort
+
     opts = ort.SessionOptions()
     opts.intra_op_num_threads = num_threads
     opts.inter_op_num_threads = 1
     opts.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
     opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-
-    if use_gpu and "CUDAExecutionProvider" in ort.get_available_providers():
-        providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
-        logger.info("使用 GPU 推理 (CUDA)")
-    else:
-        providers = ["CPUExecutionProvider"]
-        if use_gpu:
-            logger.warning("CUDAExecutionProvider 不可用，回退 CPU")
-
-    sess = ort.InferenceSession(
-        os.path.join(model_dir, model_file),
-        sess_options=opts,
-        providers=providers,
-    )
-    neg_mean, inv_stddev = _parse_metadata(sess)
-    return sess, neg_mean, inv_stddev
+    return ort.InferenceSession(path, sess_options=opts, providers=providers)
 
 
-def load_tokens(model_dir: str) -> dict:
-    """加载词表 tokens.txt"""
-    tokens = {}
-    with open(os.path.join(model_dir, "tokens.txt"), encoding="utf-8") as f:
-        for line in f:
-            parts = line.rstrip("\n").split(" ")
-            if len(parts) == 2:
-                tokens[int(parts[1])] = parts[0]
-    return tokens
+def _model_suffix(model_dir: str) -> str:
+    if os.path.isfile(os.path.join(model_dir, "encoder.int4.onnx")):
+        return ".int4.onnx"
+    if os.path.isfile(os.path.join(model_dir, "encoder.onnx")):
+        return ".onnx"
+    raise FileNotFoundError(f"Qwen3-ASR encoder not found in {model_dir}")
 
 
-# ─── 音频处理 ───────────────────────────────────────────────────────────────────
+def _validate_model_dir(model_dir: str, suffix: str):
+    required = [
+        "config.json",
+        "tokenizer.json",
+        "embed_tokens.bin",
+        "encoder" + suffix,
+        "decoder_init" + suffix,
+        "decoder_step" + suffix,
+    ]
+    missing = [name for name in required if not os.path.isfile(os.path.join(model_dir, name))]
+    if missing:
+        raise FileNotFoundError(f"Qwen3-ASR model directory is incomplete: {missing}")
+
+
+class Qwen3ASREngine:
+    def __init__(self, model_dir: str, num_threads: int = None, use_gpu: bool = False):
+        if num_threads is None:
+            cores = os.cpu_count() or 4
+            num_threads = min(max(2, cores - 1), 4)
+
+        self.model_dir = model_dir
+        self.suffix = _model_suffix(model_dir)
+        _validate_model_dir(model_dir, self.suffix)
+
+        self.providers = _providers(use_gpu)
+        self.config = self._load_config()
+        self.special = self.config.get("special_tokens", {})
+        self.max_new_tokens = int(os.environ.get("QWEN_ASR_MAX_NEW_TOKENS", "96"))
+
+        self.encoder = _ort_session(os.path.join(model_dir, "encoder" + self.suffix), self.providers, num_threads)
+        self.decoder_init = _ort_session(
+            os.path.join(model_dir, "decoder_init" + self.suffix), self.providers, num_threads
+        )
+        self.decoder_step = _ort_session(
+            os.path.join(model_dir, "decoder_step" + self.suffix), self.providers, num_threads
+        )
+        self.tokenizer = self._load_tokenizer()
+        self.embed_tokens = self._load_embeddings()
+
+        logger.info(
+            "Qwen3-ASR model loaded (%s, provider: %s)",
+            "int4" if self.suffix == ".int4.onnx" else "fp32",
+            self.providers[0],
+        )
+
+    def _load_config(self):
+        with open(os.path.join(self.model_dir, "config.json"), "r", encoding="utf-8") as f:
+            config = json.load(f)
+        if config.get("model_type") != "qwen3_asr":
+            raise RuntimeError(f"Unsupported ASR model_type: {config.get('model_type')}")
+        return config
+
+    def _load_tokenizer(self):
+        from tokenizers import Tokenizer
+
+        return Tokenizer.from_file(os.path.join(self.model_dir, "tokenizer.json"))
+
+    def _load_embeddings(self):
+        decoder = self.config.get("decoder", {})
+        vocab_size = int(decoder.get("vocab_size", 151936))
+        hidden_size = int(decoder.get("hidden_size", 1024))
+        return np.memmap(
+            os.path.join(self.model_dir, "embed_tokens.bin"),
+            dtype=np.float16,
+            mode="r",
+            shape=(vocab_size, hidden_size),
+        )
+
+    def _token_ids(self, text: str):
+        return self.tokenizer.encode(text).ids
+
+    def _log_mel(self, wav: np.ndarray) -> np.ndarray:
+        import librosa
+
+        wav = np.asarray(wav, dtype=np.float32)
+        if wav.size == 0:
+            wav = np.zeros(SAMPLE_RATE // 10, dtype=np.float32)
+
+        mel_cfg = self.config.get("mel", {})
+        n_fft = int(mel_cfg.get("n_fft", 400))
+        hop_length = int(mel_cfg.get("hop_length", 160))
+        n_mels = int(mel_cfg.get("n_mels", 128))
+        fmin = float(mel_cfg.get("fmin", 0))
+        fmax = float(mel_cfg.get("fmax", SAMPLE_RATE // 2))
+
+        mel = librosa.feature.melspectrogram(
+            y=wav,
+            sr=SAMPLE_RATE,
+            n_fft=n_fft,
+            hop_length=hop_length,
+            win_length=n_fft,
+            window="hann",
+            center=True,
+            power=2.0,
+            n_mels=n_mels,
+            fmin=fmin,
+            fmax=fmax,
+            htk=False,
+            norm="slaney",
+        )
+        log_mel = np.log10(np.maximum(mel, 1e-10))
+        log_mel = np.maximum(log_mel, log_mel.max() - 8.0)
+        log_mel = (log_mel + 4.0) / 4.0
+        return log_mel[None].astype(np.float32)
+
+    def _build_prompt(self, audio_len: int):
+        audio_pad_id = int(self.special.get("audio_pad_token_id", 151676))
+        prefix = self._token_ids("<|im_start|>system<|im_end|><|im_start|>user<|audio_start|>")
+        suffix = self._token_ids("<|audio_end|><|im_end|><|im_start|>assistant")
+        audio_offset = len(prefix)
+        ids = prefix + [audio_pad_id] * int(audio_len) + suffix
+        return np.asarray([ids], dtype=np.int64), np.asarray([audio_offset], dtype=np.int64)
+
+    def _clean_text(self, ids) -> str:
+        text = self.tokenizer.decode([int(i) for i in ids], skip_special_tokens=True)
+        text = text.replace("<asr_text>", "")
+        text = re.sub(r"<\|[^|]*\|>", "", text)
+        return text.strip()
+
+    def transcribe(self, wav: np.ndarray, language: str = "auto", use_itn: bool = True) -> dict:
+        t0 = time.perf_counter()
+
+        tf = time.perf_counter()
+        mel = self._log_mel(wav)
+        audio_features, = self.encoder.run(None, {"mel": mel})
+        feat_ms = (time.perf_counter() - tf) * 1000
+
+        ti = time.perf_counter()
+        audio_len = int(audio_features.shape[1])
+        input_ids, audio_offset = self._build_prompt(audio_len)
+        seq_len = input_ids.shape[1]
+        position_ids = np.arange(seq_len, dtype=np.int64)[None, :]
+
+        logits, past_keys, past_values = self.decoder_init.run(
+            None,
+            {
+                "input_ids": input_ids,
+                "position_ids": position_ids,
+                "audio_features": audio_features.astype(np.float32, copy=False),
+                "audio_offset": audio_offset,
+            },
+        )
+
+        eos_ids = {int(i) for i in self.special.get("eos_token_ids", [151643, 151645])}
+        out_ids = []
+        next_id = int(np.argmax(logits[:, -1, :], axis=-1)[0])
+        for _ in range(self.max_new_tokens):
+            if next_id in eos_ids:
+                break
+            out_ids.append(next_id)
+
+            input_embeds = np.asarray(self.embed_tokens[next_id], dtype=np.float32).reshape(1, 1, -1)
+            step_position = np.asarray([[seq_len + len(out_ids) - 1]], dtype=np.int64)
+            logits, past_keys, past_values = self.decoder_step.run(
+                None,
+                {
+                    "input_embeds": input_embeds,
+                    "position_ids": step_position,
+                    "past_keys": past_keys,
+                    "past_values": past_values,
+                },
+            )
+            next_id = int(np.argmax(logits[:, -1, :], axis=-1)[0])
+
+        infer_ms = (time.perf_counter() - ti) * 1000
+        return {
+            "text": self._clean_text(out_ids),
+            "feat_ms": round(feat_ms, 1),
+            "infer_ms": round(infer_ms, 1),
+            "total_ms": round((time.perf_counter() - t0) * 1000, 1),
+            "segments": 1,
+        }
+
+
+def load_session(model_dir: str, num_threads: int = None, use_gpu: bool = False):
+    return Qwen3ASREngine(model_dir, num_threads=num_threads, use_gpu=use_gpu)
+
 
 def load_audio(source) -> np.ndarray:
-    """加载音频文件/字节，返回 16kHz float32 单声道 numpy 数组"""
     try:
         data, sr = sf.read(source, dtype="float32", always_2d=False)
     except Exception:
         import librosa
+
         if isinstance(source, (bytes, bytearray)):
             source = io.BytesIO(source)
         data, sr = librosa.load(source, sr=None, mono=True, dtype=np.float32)
@@ -93,95 +249,10 @@ def load_audio(source) -> np.ndarray:
         data = data.mean(axis=1)
     if sr != SAMPLE_RATE:
         import librosa
+
         data = librosa.resample(data, orig_sr=sr, target_sr=SAMPLE_RATE)
     return data
 
 
-# ─── 特征提取 ───────────────────────────────────────────────────────────────────
-
-def _fbank(wav: np.ndarray) -> np.ndarray:
-    sr, n_mels, n_fft = SAMPLE_RATE, 80, 512
-    win_samples = int(sr * 0.025)
-    hop_samples = int(sr * 0.010)
-    n_frames = (len(wav) - win_samples) // hop_samples + 1
-    idx = np.arange(win_samples)[None, :] + np.arange(n_frames)[:, None] * hop_samples
-    frames = wav[idx] * np.hamming(win_samples)
-    spec = np.abs(np.fft.rfft(frames, n=n_fft)) ** 2
-    # mel filterbank
-    fmin, fmax = 20, sr // 2
-    mel_pts = np.linspace(2595 * np.log10(1 + fmin / 700), 2595 * np.log10(1 + fmax / 700), n_mels + 2)
-    hz_pts = 700 * (10 ** (mel_pts / 2595) - 1)
-    bins = np.floor((n_fft + 1) * hz_pts / sr).astype(int)
-    fb = np.zeros((n_mels, n_fft // 2 + 1), dtype=np.float32)
-    for m in range(1, n_mels + 1):
-        fb[m-1, bins[m-1]:bins[m]] = (np.arange(bins[m-1], bins[m]) - bins[m-1]) / max(bins[m] - bins[m-1], 1)
-        fb[m-1, bins[m]:bins[m+1]] = (bins[m+1] - np.arange(bins[m], bins[m+1])) / max(bins[m+1] - bins[m], 1)
-    return np.log(spec @ fb.T + 1e-10).astype(np.float32)
-
-
-def _lfr(fbank: np.ndarray) -> np.ndarray:
-    T = fbank.shape[0]
-    if T == 0:
-        raise ValueError("音频过短")
-    if T < LFR_M:
-        fbank = np.concatenate([fbank, np.tile(fbank[-1:], (LFR_M - T, 1))], axis=0)
-        T = fbank.shape[0]
-    lfr_len = (T - LFR_M) // LFR_N + 1
-    idx = np.arange(lfr_len)[:, None] * LFR_N + np.arange(LFR_M)[None, :]
-    return fbank[idx].reshape(lfr_len, -1)  # (T_lfr, 560)
-
-
-def extract_features(wav: np.ndarray, neg_mean: np.ndarray, inv_stddev: np.ndarray):
-    """音频波形 → 归一化 LFR 特征"""
-    feat = _lfr(_fbank(wav))                        # (T, 560)
-    feat = (feat + neg_mean[:feat.shape[1]]) * inv_stddev[:feat.shape[1]]
-    return feat[None].astype(np.float32)            # (1, T, 560)
-
-
-# ─── 解码 ───────────────────────────────────────────────────────────────────────
-
-def _ctc_decode(logits: np.ndarray, tokens: dict) -> str:
-    ids = np.argmax(logits[0], axis=-1)
-    out, prev = [], -1
-    for i in ids:
-        i = int(i)
-        if i != prev and i > 2:  # skip blank(0), <s>(1), </s>(2)
-            out.append(i)
-        prev = i
-    text = "".join(tokens.get(i, "") for i in out)
-    text = re.sub(r"<\|[^|]*\|>", "", text)
-    return text.replace("\u2581", " ").strip()
-
-
-# ─── 推理入口 ───────────────────────────────────────────────────────────────────
-
-def transcribe(sess, neg_mean, inv_stddev, tokens, wav: np.ndarray,
-               language: str = "auto", use_itn: bool = True) -> dict:
-    """
-    执行 ASR 推理。
-    返回: {"text": str, "feat_ms": float, "infer_ms": float, "total_ms": float}
-    """
-    t0 = time.perf_counter()
-    lang_id = LANG_IDS.get(language, 0)
-    text_norm_id = WITH_ITN if use_itn else WITHOUT_ITN
-
-    tf = time.perf_counter()
-    feat = extract_features(wav, neg_mean, inv_stddev)
-    feat_ms = (time.perf_counter() - tf) * 1000
-
-    ti = time.perf_counter()
-    logits, = sess.run(None, {
-        "x":         feat,
-        "x_length":  np.array([feat.shape[1]], dtype=np.int32),
-        "language":  np.array([lang_id], dtype=np.int32),
-        "text_norm": np.array([text_norm_id], dtype=np.int32),
-    })
-    infer_ms = (time.perf_counter() - ti) * 1000
-
-    return {
-        "text": _ctc_decode(logits, tokens),
-        "feat_ms": round(feat_ms, 1),
-        "infer_ms": round(infer_ms, 1),
-        "total_ms": round((time.perf_counter() - t0) * 1000, 1),
-        "segments": 1,
-    }
+def transcribe(engine: Qwen3ASREngine, wav: np.ndarray, language: str = "auto", use_itn: bool = True) -> dict:
+    return engine.transcribe(wav, language=language, use_itn=use_itn)

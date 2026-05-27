@@ -22,7 +22,13 @@ log = logging.getLogger(__name__)
 
 MIC_BLOCKSIZE = 480  # 30ms @ 16kHz
 MIC_DEVICE = os.environ.get("MIC_DEVICE")
-MIC_CHANNEL = int(os.environ.get("MIC_CHANNEL", "0"))
+MIC_CHANNEL_RAW = os.environ.get("MIC_CHANNEL", "0")
+try:
+    MIC_CHANNEL = int(MIC_CHANNEL_RAW)
+except ValueError:
+    log = logging.getLogger(__name__)
+    log.warning("Invalid MIC_CHANNEL=%r; falling back to 0", MIC_CHANNEL_RAW)
+    MIC_CHANNEL = 0
 MIC_LEVEL_LOG_INTERVAL = float(os.environ.get("MIC_LEVEL_LOG_INTERVAL", "3"))
 
 

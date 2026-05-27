@@ -1,26 +1,34 @@
 """
-pipeline/asr_client.py
+ASR HTTP client.
 
-ASR HTTP 客户端 — 调用 asr/server.py 提供的 HTTP 服务。
-
-环境变量:
-    ASR_URL   ASR 服务地址，默认 http://localhost:8000/asr
+The pipeline sends raw 16 kHz mono int16 PCM to the local ASR service as a WAV
+upload. Qwen3-ASR can be much slower than the old ASR model on CPU, so the
+timeout is intentionally configurable and higher than before.
 """
 
 import io
+import logging
 import os
 import struct
-import logging
+import time
 
 import aiohttp
 
 log = logging.getLogger(__name__)
 
 ASR_URL = os.environ.get("ASR_URL", "http://localhost:8000/asr")
+ASR_TIMEOUT = float(os.environ.get("ASR_TIMEOUT", "90"))
+PCM_SAMPLE_RATE = 16000
+PCM_CHANNELS = 1
+PCM_SAMPLE_WIDTH = 2
 
 
-def _pcm_to_wav(pcm_bytes: bytes, sample_rate: int = 16000, channels: int = 1, sample_width: int = 2) -> bytes:
-    """将原始 PCM 字节转为 WAV 格式（加 44 字节头）"""
+def _pcm_to_wav(
+    pcm_bytes: bytes,
+    sample_rate: int = PCM_SAMPLE_RATE,
+    channels: int = PCM_CHANNELS,
+    sample_width: int = PCM_SAMPLE_WIDTH,
+) -> bytes:
     data_size = len(pcm_bytes)
     buf = io.BytesIO()
     buf.write(b"RIFF")
@@ -40,24 +48,51 @@ def _pcm_to_wav(pcm_bytes: bytes, sample_rate: int = 16000, channels: int = 1, s
     return buf.getvalue()
 
 
+def _pcm_duration_ms(pcm_bytes: bytes) -> float:
+    if not pcm_bytes:
+        return 0.0
+    samples = len(pcm_bytes) / PCM_SAMPLE_WIDTH / PCM_CHANNELS
+    return samples / PCM_SAMPLE_RATE * 1000
+
+
 async def call_asr(pcm_bytes: bytes) -> str:
-    """调用 ASR HTTP 服务识别语音"""
     wav_bytes = _pcm_to_wav(pcm_bytes)
+    audio_ms = _pcm_duration_ms(pcm_bytes)
+    started = time.perf_counter()
+
     try:
         form = aiohttp.FormData()
         form.add_field("audio", wav_bytes, filename="audio.wav", content_type="audio/wav")
         form.add_field("language", "zh")
         form.add_field("use_itn", "true")
 
-        async with aiohttp.ClientSession() as session:
-            async with session.post(ASR_URL, data=form, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+        timeout = aiohttp.ClientTimeout(total=ASR_TIMEOUT)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(ASR_URL, data=form) as resp:
                 if resp.status != 200:
-                    log.error("ASR 服务返回 %d", resp.status)
+                    body = await resp.text()
+                    log.error("ASR 服务返回 %d: %s", resp.status, body[:300])
                     return ""
+
                 result = await resp.json()
                 text = result.get("text", "")
-                log.info("ASR 结果: %s (耗时 %sms)", text, result.get("total_ms", "?"))
+                elapsed_ms = (time.perf_counter() - started) * 1000
+                log.info(
+                    "ASR 结果: %s (服务耗时 %sms, HTTP %.1fms, 音频 %.0fms)",
+                    text,
+                    result.get("total_ms", "?"),
+                    elapsed_ms,
+                    audio_ms,
+                )
                 return text
-    except Exception as e:
-        log.error("ASR 调用失败: %s", e)
+    except Exception as exc:
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        log.error(
+            "ASR 调用失败: %s: %s (HTTP %.1fms, timeout %.1fs, 音频 %.0fms)",
+            type(exc).__name__,
+            exc,
+            elapsed_ms,
+            ASR_TIMEOUT,
+            audio_ms,
+        )
         return ""

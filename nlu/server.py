@@ -16,9 +16,8 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_MODEL_DIR = os.path.join(_PROJECT_ROOT, "models", "nlu")
-DEFAULT_TOKENIZER_DIR = os.path.join(_MODULE_DIR, "tokenizer")
+DEFAULT_TOKENIZER_DIR = os.path.join(DEFAULT_MODEL_DIR, "tokenizer")
 
 
 def run_serve(enc_sess, dec_sess, tokenizer, host="0.0.0.0", port=8001):

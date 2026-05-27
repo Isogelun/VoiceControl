@@ -1,13 +1,14 @@
 """
 pipeline/main.py
 
-Wake word -> VAD -> ASR -> NLU/rules -> command JSON.
+Wake word -> VAD -> ASR -> NLU -> command JSON.
 """
 
 import asyncio
 import json
 import logging
 import os
+import time
 
 import numpy as np
 import sherpa_onnx
@@ -22,6 +23,7 @@ from .command_dispatcher import CommandDispatcher
 from .nlu_client import call_nlu
 from .speaker import Speaker
 from .text_normalizer import (
+    compact_text,
     is_wake_phrase,
     normalize_asr_text,
     parse_command_rule,
@@ -33,11 +35,34 @@ _MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
 _PROJECT_ROOT = os.path.dirname(_MODULE_DIR)
 
 ROBOT_IP = os.environ.get("UNITREE_ROBOT_IP", "192.168.8.181")
+ROBOT_WEBRTC_METHOD = os.environ.get("UNITREE_WEBRTC_METHOD", "LocalSTA")
+ROBOT_SERIAL_NUMBER = os.environ.get("UNITREE_ROBOT_SERIAL_NUMBER") or None
+ROBOT_AES_128_KEY = os.environ.get("UNITREE_AES_128_KEY") or None
+ROBOT_USERNAME = os.environ.get("UNITREE_USERNAME") or None
+ROBOT_PASSWORD = os.environ.get("UNITREE_PASSWORD") or None
+ROBOT_REGION = os.environ.get("UNITREE_REGION", "global")
+ROBOT_DEVICE_TYPE = os.environ.get("UNITREE_DEVICE_TYPE", "Go2")
+WEBRTC_LEVEL_LOG_INTERVAL = float(os.environ.get("WEBRTC_LEVEL_LOG_INTERVAL", os.environ.get("MIC_LEVEL_LOG_INTERVAL", "3")))
+WEBRTC_AUDIO_GAIN = float(os.environ.get("WEBRTC_AUDIO_GAIN", "1.0"))
+WEBRTC_AUDIO_DENOISE = os.environ.get("WEBRTC_AUDIO_DENOISE", os.environ.get("AUDIO_DENOISE", "0")) not in {"0", "false", "False", "no"}
+WEBRTC_NOISE_GATE_RMS = float(os.environ.get("WEBRTC_NOISE_GATE_RMS", "80"))
+WEBRTC_NOISE_GATE_ATTENUATION = float(os.environ.get("WEBRTC_NOISE_GATE_ATTENUATION", "0.2"))
+WEBRTC_TARGET_PEAK = float(os.environ.get("WEBRTC_TARGET_PEAK", "12000"))
+WEBRTC_CONNECT_RETRIES = max(1, int(os.environ.get("UNITREE_WEBRTC_CONNECT_RETRIES", "3")))
+WEBRTC_RETRY_DELAY_MS = max(0, int(os.environ.get("UNITREE_WEBRTC_RETRY_DELAY_MS", "5000")))
 KWS_MODEL_DIR = os.environ.get("KWS_MODEL_DIR", os.path.join(_PROJECT_ROOT, "models", "kws"))
 WAKE_KEYWORD = os.environ.get("WAKE_KEYWORD", "n ǐ h ǎo h uā h uā @你好花花")
 WAKE_BACKEND = os.environ.get("WAKE_BACKEND", "asr" if os.name == "nt" else "kws").lower()
 WAKE_TEXT = os.environ.get("WAKE_TEXT", "你好花花,你好，花花,花花")
+WAKE_ALIASES = os.environ.get(
+    "WAKE_ALIASES",
+    "你好曼波,曼波,慢播,快播,那波,南波,慢波,曼播,你好慢播,你好快播,你好那波,你好南波",
+)
 WAKE_AUDIO = os.environ.get("WAKE_AUDIO", os.path.join(_PROJECT_ROOT, "audio", "xuanxinghuida.mp3"))
+
+WAKE_FEEDBACK_ENABLED = os.environ.get("WAKE_FEEDBACK_ENABLED", "0") not in {"0", "false", "False", "no", ""}
+COMMAND_RULES_ENABLED = os.environ.get("COMMAND_RULES_ENABLED", "0") not in {"0", "false", "False", "no", ""}
+COMMAND_FEEDBACK_SUPPRESS_MS = int(os.environ.get("COMMAND_FEEDBACK_SUPPRESS_MS", "1800"))
 
 VAD_SAMPLE_RATE = 16000
 VAD_FRAME_MS = 30
@@ -46,6 +71,10 @@ VAD_MODE = os.environ.get("VAD_MODE", "silence").lower()
 VAD_AGGRESSIVENESS = int(os.environ.get("VAD_AGGRESSIVENESS", "2"))
 VAD_SILENCE_RMS = float(os.environ.get("VAD_SILENCE_RMS", "300"))
 VAD_SILENCE_MULTIPLIER = float(os.environ.get("VAD_SILENCE_MULTIPLIER", "2.5"))
+COMMAND_VAD_SILENCE_RMS = float(os.environ.get("COMMAND_VAD_SILENCE_RMS", "360"))
+COMMAND_VAD_SILENCE_MULTIPLIER = float(os.environ.get("COMMAND_VAD_SILENCE_MULTIPLIER", "1.15"))
+VAD_DEBUG = os.environ.get("VAD_DEBUG", "0") not in {"0", "false", "False", "no", ""}
+VAD_DEBUG_INTERVAL = float(os.environ.get("VAD_DEBUG_INTERVAL", "1.0"))
 SILENCE_TIMEOUT_MS = int(os.environ.get("VAD_SILENCE_TIMEOUT_MS", "1200"))
 MIN_SPEECH_MS = int(os.environ.get("VAD_MIN_SPEECH_MS", "240"))
 COMMAND_LISTEN_TIMEOUT_MS = int(os.environ.get("COMMAND_LISTEN_TIMEOUT_MS", "8000"))
@@ -79,14 +108,162 @@ def _write_keywords_file() -> str:
 
 def _to_16k_mono(frame) -> np.ndarray:
     raw = np.frombuffer(frame.to_ndarray(), dtype=np.int16)
-    mono = raw.reshape(-1, 2).mean(axis=1).astype(np.int16)
-    return mono[::3]
+    source_rate = int(getattr(frame, "sample_rate", 48000) or 48000)
+    source_channels = _frame_channel_count(frame)
+
+    if raw.size and raw.size % source_channels == 0:
+        mono = raw.reshape(-1, source_channels).mean(axis=1)
+    else:
+        mono = raw.astype(np.float32, copy=False)
+
+    if mono.size in {320, 640, 960}:
+        source_rate = int(mono.size * 50)
+
+    mono = _condition_webrtc_pcm(mono)
+    if source_rate != VAD_SAMPLE_RATE and mono.size:
+        target_len = max(1, int(round(mono.size * VAD_SAMPLE_RATE / source_rate)))
+        source_x = np.arange(mono.size, dtype=np.float32)
+        target_x = np.linspace(0, mono.size - 1, target_len, dtype=np.float32)
+        mono = np.interp(target_x, source_x, mono).astype(np.float32)
+
+    return np.clip(mono, -32768, 32767).astype(np.int16)
+
+
+def _frame_channel_count(frame) -> int:
+    layout = getattr(frame, "layout", None)
+    channels = getattr(layout, "channels", None)
+    try:
+        count = len(channels) if channels is not None else 0
+    except TypeError:
+        count = int(channels or 0)
+    return max(1, count)
+
+
+def _condition_webrtc_pcm(mono: np.ndarray) -> np.ndarray:
+    x = np.asarray(mono, dtype=np.float32).reshape(-1)
+    if not x.size:
+        return x
+
+    x = x - float(np.mean(x))
+    peak = float(np.max(np.abs(x)))
+    if peak > 0:
+        limiter_gain = min(1.0, WEBRTC_TARGET_PEAK / peak)
+        x *= limiter_gain
+    x *= WEBRTC_AUDIO_GAIN
+
+    if WEBRTC_AUDIO_DENOISE:
+        rms = _frame_rms(x)
+        if rms < WEBRTC_NOISE_GATE_RMS:
+            x *= WEBRTC_NOISE_GATE_ATTENUATION
+    return x
+
+
+def _resolve_webrtc_method(method_name: str, enum_cls):
+    normalized = (method_name or "LocalSTA").replace("_", "").replace("-", "").lower()
+    aliases = {
+        "localsta": "LocalSTA",
+        "sta": "LocalSTA",
+        "lan": "LocalSTA",
+        "localap": "LocalAP",
+        "ap": "LocalAP",
+        "remote": "Remote",
+        "cloud": "Remote",
+    }
+    enum_name = aliases.get(normalized)
+    if not enum_name:
+        valid = ", ".join(item.name for item in enum_cls)
+        raise RuntimeError(f"Unsupported UNITREE_WEBRTC_METHOD={method_name!r}; use one of: {valid}")
+    return getattr(enum_cls, enum_name)
+
+
+def _make_go2_webrtc_connection():
+    from unitree_webrtc_connect import UnitreeWebRTCConnection, WebRTCConnectionMethod
+
+    method = _resolve_webrtc_method(ROBOT_WEBRTC_METHOD, WebRTCConnectionMethod)
+    kwargs = {
+        "serialNumber": ROBOT_SERIAL_NUMBER,
+        "ip": ROBOT_IP,
+        "username": ROBOT_USERNAME,
+        "password": ROBOT_PASSWORD,
+        "aes_128_key": ROBOT_AES_128_KEY,
+        "region": ROBOT_REGION,
+        "device_type": ROBOT_DEVICE_TYPE,
+    }
+    if method.name in {"LocalAP", "Remote"}:
+        kwargs["ip"] = None
+    log.info(
+        "GO2 WebRTC: method=%s ip=%s serial=%s region=%s device_type=%s aes_key=%s",
+        method.name,
+        kwargs.get("ip") or "-",
+        ROBOT_SERIAL_NUMBER or "-",
+        ROBOT_REGION,
+        ROBOT_DEVICE_TYPE,
+        "set" if ROBOT_AES_128_KEY else "unset",
+    )
+    return UnitreeWebRTCConnection(method, **kwargs)
+
+
+def _unique_phrases(phrases):
+    seen = set()
+    out = []
+    for phrase in phrases:
+        normalized = normalize_asr_text(phrase).strip()
+        key = compact_text(normalized)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(normalized)
+    return out
+
+
+def _strip_leading_wake_aliases(text: str, wake_phrases) -> str:
+    candidate = normalize_asr_text(text or "")
+    for _ in range(3):
+        stripped = _strip_boundary_punctuation(candidate)
+        changed = False
+        for phrase in wake_phrases:
+            phrase_key = compact_text(normalize_asr_text(phrase))
+            if not phrase_key:
+                continue
+            after = _slice_after_leading_compact_phrase(stripped, phrase_key)
+            if after is None:
+                continue
+            if len(after) < len(stripped):
+                candidate = after
+                changed = True
+                break
+        if not changed:
+            return stripped
+    return _strip_boundary_punctuation(candidate)
+
+
+def _slice_after_leading_compact_phrase(text: str, phrase_compact: str):
+    compact_chars = []
+    original_ends = []
+    for index, ch in enumerate(text):
+        if not ch.lower().isalnum():
+            continue
+        compact_chars.append(ch.lower())
+        original_ends.append(index + 1)
+
+    compact = "".join(compact_chars)
+    if not compact.startswith(phrase_compact):
+        return None
+    end_index = original_ends[len(phrase_compact) - 1]
+    return _strip_boundary_punctuation(text[end_index:])
+
+
+def _strip_boundary_punctuation(text: str) -> str:
+    return (text or "").strip(" \t\r\n,.;:!?\uFF0C\u3002\uFF01\uFF1F\uFF1B\uFF1A")
 
 
 class VoicePipeline:
     def __init__(self, speaker: Speaker = None):
         self.wake_backend = WAKE_BACKEND
-        self.wake_texts = [t.strip() for t in WAKE_TEXT.split(",") if t.strip()]
+        self.wake_texts = _unique_phrases(
+            [t.strip() for t in WAKE_TEXT.split(",") if t.strip()]
+            + [t.strip() for t in WAKE_ALIASES.split(",") if t.strip()]
+        )
         self.kws = None
         self.kws_stream = None
         if self.wake_backend == "kws":
@@ -100,11 +277,23 @@ class VoicePipeline:
         self._noise_rms = VAD_SILENCE_RMS
         self.speaker = speaker
         self.dispatcher = CommandDispatcher(speaker=speaker)
+        self._audio_stats = {
+            "frames": 0,
+            "samples": 0,
+            "rms": 0.0,
+            "peak": 0,
+            "source_rate": 0,
+            "source_channels": 0,
+            "last_log": time.monotonic(),
+        }
+        self._last_vad_debug_log = 0.0
 
         self._state = "waiting"
         self._pcm_buf = np.array([], dtype=np.int16)
         self._wake_metadata = {}
+        self._feedback_suppress_until = 0.0
         self._reset_speech_capture()
+        log.info("Wake feedback enabled: %s", WAKE_FEEDBACK_ENABLED)
         log.info(
             "VAD 裁切: mode=%s silence_rms=%.1f multiplier=%.2f silence_timeout=%sms min_speech=%sms",
             self.vad_mode,
@@ -116,10 +305,15 @@ class VoicePipeline:
 
     async def on_audio_frame(self, frame):
         pcm = _to_16k_mono(frame)
+        self._log_audio_level(frame, pcm)
         await self.push_pcm(pcm)
 
     async def push_pcm(self, pcm: np.ndarray):
         pcm = np.asarray(pcm, dtype=np.int16).reshape(-1)
+        if self._is_feedback_suppressed():
+            self._pcm_buf = np.array([], dtype=np.int16)
+            self._reset_speech_capture()
+            return
         if self._state == "waiting" and self.wake_backend == "hardware":
             return
         self._pcm_buf = np.concatenate([self._pcm_buf, pcm])
@@ -195,8 +389,27 @@ class VoicePipeline:
                 self._reset_speech_capture()
                 break
 
+            if self._listen_frame_count >= COMMAND_LISTEN_TIMEOUT_FRAMES:
+                if self._speech_frame_count >= MIN_SPEECH_FRAMES:
+                    log.info(
+                        "Command listen timeout with speech buffered: speech=%sms, running ASR/NLU",
+                        self._speech_frame_count * VAD_FRAME_MS,
+                    )
+                    await self._process_utterance(self._with_padding(self._speech_buf))
+                else:
+                    log.info("Command listen timeout without speech, back to wake waiting")
+                self._state = "waiting"
+                self._wake_metadata = {}
+                self._reset_speech_capture()
+                break
+
             if self._silence_count >= SILENCE_TIMEOUT_FRAMES:
                 if self._speech_frame_count >= MIN_SPEECH_FRAMES:
+                    log.info(
+                        "Command speech ended: speech=%sms silence=%sms, running ASR/NLU",
+                        self._speech_frame_count * VAD_FRAME_MS,
+                        SILENCE_TIMEOUT_MS,
+                    )
                     await self._process_utterance(self._with_padding(self._speech_buf))
                 else:
                     log.debug("语句太短，丢弃")
@@ -211,6 +424,21 @@ class VoicePipeline:
         if text:
             log.info("唤醒检测 ASR: %s -> %s", text, normalized)
         if normalized and is_wake_phrase(normalized, self.wake_texts):
+            command_text = self._strip_wake_phrase(normalized)
+            if command_text:
+                log.info("Wake phrase and command in one utterance: %s", command_text)
+                self._wake_metadata = {
+                    "source": "asr",
+                    "keyword": normalized,
+                    "asr_text": text,
+                    "normalized_text": normalized,
+                    "inline_command": True,
+                }
+                await self._process_command_text(command_text, text, command_text)
+                self._state = "waiting"
+                self._wake_metadata = {}
+                self._reset_speech_capture()
+                return
             log.info("唤醒词 [你好花花] 检测到，开始监听...")
             self._enter_listening(
                 {
@@ -222,7 +450,6 @@ class VoicePipeline:
             )
 
     async def _process_utterance(self, pcm_bytes: bytes):
-        wake_metadata = dict(self._wake_metadata)
         try:
             log.info("识别中...")
             text = await call_asr(pcm_bytes)
@@ -234,24 +461,92 @@ class VoicePipeline:
             if normalized != text:
                 log.info("ASR 归一化: %s -> %s", text, normalized)
 
-            result = parse_command_rule(text)
-            if result:
-                log.info("规则命中: %s", json.dumps(result, ensure_ascii=False))
-            else:
-                result = await call_nlu(normalized)
+            command_text = normalized
+            if is_wake_phrase(normalized, getattr(self, "wake_texts", [])):
+                stripped = self._strip_wake_phrase(normalized)
+                if stripped:
+                    command_text = stripped
+                    log.info("Command text after wake-prefix stripping: %s -> %s", normalized, command_text)
+                else:
+                    log.info("Command utterance only contains wake phrase, ignored: %s", normalized)
+                    return
+
+            result = await self._parse_command_with_nlu(command_text)
             log.info("指令 JSON: %s", json.dumps(result, ensure_ascii=False))
-            dispatch_result = await self.dispatcher.dispatch(result, text, normalized, wake_metadata)
+            dispatch_result = await self.dispatcher.dispatch(result, text, command_text, dict(self._wake_metadata))
             log.info("指令分发结果: %s", json.dumps(dispatch_result, ensure_ascii=False))
+            self._suppress_feedback_audio()
         finally:
             self._wake_metadata = {}
+
+    async def _process_command_text(self, command_text: str, asr_text: str, normalized_text: str):
+        wake_metadata = dict(self._wake_metadata)
+        result = await self._parse_command_with_nlu(command_text)
+        log.info("Command JSON: %s", json.dumps(result, ensure_ascii=False))
+        dispatch_result = await self.dispatcher.dispatch(result, asr_text, normalized_text, wake_metadata)
+        log.info("Command dispatch result: %s", json.dumps(dispatch_result, ensure_ascii=False))
+        self._suppress_feedback_audio()
+
+    async def _parse_command_with_nlu(self, text: str) -> dict:
+        result = await call_nlu(text)
+        log.info("NLU model result: %s", json.dumps(result, ensure_ascii=False))
+        if COMMAND_RULES_ENABLED and (not result or result.get("intent") == "unknown"):
+            fallback = parse_command_rule(text)
+            if fallback:
+                log.info("Rule fallback matched: %s", json.dumps(fallback, ensure_ascii=False))
+                return fallback
+        return result
+
+    def _strip_wake_phrase(self, text: str) -> str:
+        normalized = normalize_asr_text(text)
+        best = ""
+        for phrase in self.wake_texts:
+            phrase_normalized = normalize_asr_text(phrase)
+            phrase_compact = compact_text(phrase_normalized)
+            if not phrase_compact:
+                continue
+            candidate = self._slice_after_compact_phrase(normalized, phrase_compact)
+            if candidate is None:
+                continue
+            if len(candidate) > len(best):
+                best = candidate
+        return normalize_asr_text(_strip_leading_wake_aliases(best, self.wake_texts))
+
+    @staticmethod
+    def _slice_after_compact_phrase(text: str, phrase_compact: str):
+        compact_chars = []
+        original_ends = []
+        for index, ch in enumerate(text):
+            if not ch.lower().isalnum():
+                continue
+            compact_chars.append(ch.lower())
+            original_ends.append(index + 1)
+
+        compact = "".join(compact_chars)
+        phrase_index = compact.find(phrase_compact)
+        if phrase_index < 0:
+            return None
+        end_index = original_ends[phrase_index + len(phrase_compact) - 1]
+        return text[end_index:].strip(" ，,。.!！？?;；:：")
 
     def _enter_listening(self, wake_metadata: dict = None):
         self._state = "listening"
         self._wake_metadata = wake_metadata or {}
         self._reset_speech_capture()
         log.info("已进入命令监听，请说指令")
-        if self.speaker and WAKE_AUDIO:
+        if WAKE_FEEDBACK_ENABLED and self.speaker and WAKE_AUDIO:
             asyncio.create_task(self.speaker.play_file(WAKE_AUDIO))
+
+    def _suppress_feedback_audio(self):
+        if COMMAND_FEEDBACK_SUPPRESS_MS <= 0:
+            return
+        self._feedback_suppress_until = time.monotonic() + COMMAND_FEEDBACK_SUPPRESS_MS / 1000.0
+        self._pcm_buf = np.array([], dtype=np.int16)
+        self._reset_speech_capture()
+        log.info("Suppressing microphone input for %sms after feedback playback", COMMAND_FEEDBACK_SUPPRESS_MS)
+
+    def _is_feedback_suppressed(self) -> bool:
+        return time.monotonic() < getattr(self, "_feedback_suppress_until", 0.0)
 
     def _reset_speech_capture(self):
         self._speech_buf = b""
@@ -266,17 +561,96 @@ class VoicePipeline:
 
     def _is_speech(self, chunk: np.ndarray, chunk_bytes: bytes) -> bool:
         if self.vad_mode == "webrtc":
-            return self.vad.is_speech(chunk_bytes, VAD_SAMPLE_RATE)
+            is_speech = self.vad.is_speech(chunk_bytes, VAD_SAMPLE_RATE)
+            self._log_vad_decision(
+                rms=_frame_rms(chunk),
+                threshold=None,
+                is_speech=is_speech,
+                mode="webrtc",
+            )
+            return is_speech
 
         rms = _frame_rms(chunk)
-        threshold = max(VAD_SILENCE_RMS, self._noise_rms * VAD_SILENCE_MULTIPLIER)
+        if self._state == "listening":
+            threshold = max(COMMAND_VAD_SILENCE_RMS, self._noise_rms * COMMAND_VAD_SILENCE_MULTIPLIER)
+        else:
+            threshold = max(VAD_SILENCE_RMS, self._noise_rms * VAD_SILENCE_MULTIPLIER)
         is_speech = rms >= threshold
+        self._log_vad_decision(rms=rms, threshold=threshold, is_speech=is_speech, mode="silence")
         if not is_speech:
             self._noise_rms = 0.995 * self._noise_rms + 0.005 * rms
         return is_speech
 
+    def _log_vad_decision(self, rms: float, threshold, is_speech: bool, mode: str):
+        if not VAD_DEBUG:
+            return
+        now = time.monotonic()
+        if now - self._last_vad_debug_log < VAD_DEBUG_INTERVAL:
+            return
+        self._last_vad_debug_log = now
+        threshold_text = "-" if threshold is None else f"{threshold:.1f}"
+        log.info(
+            "VAD debug: state=%s mode=%s rms=%.1f threshold=%s noise=%.1f speech=%s speech_ms=%s silence_ms=%s listen_ms=%s",
+            self._state,
+            mode,
+            rms,
+            threshold_text,
+            self._noise_rms,
+            is_speech,
+            self._speech_frame_count * VAD_FRAME_MS,
+            self._silence_count * VAD_FRAME_MS,
+            self._listen_frame_count * VAD_FRAME_MS,
+        )
+
+    def _log_audio_level(self, frame, pcm: np.ndarray):
+        if WEBRTC_LEVEL_LOG_INTERVAL <= 0:
+            return
+
+        stats = self._audio_stats
+        stats["frames"] += 1
+        stats["samples"] += int(pcm.size)
+        if pcm.size:
+            x = pcm.astype(np.float32)
+            stats["rms"] = float(np.sqrt(np.mean(x * x)))
+            stats["peak"] = int(np.max(np.abs(pcm)))
+        stats["source_rate"] = int(getattr(frame, "sample_rate", 0) or 0)
+        layout = getattr(frame, "layout", None)
+        channels = getattr(layout, "channels", None)
+        try:
+            stats["source_channels"] = len(channels) if channels is not None else 0
+        except TypeError:
+            stats["source_channels"] = int(channels or 0)
+
+        now = time.monotonic()
+        if now - stats["last_log"] < WEBRTC_LEVEL_LOG_INTERVAL:
+            return
+        elapsed = max(0.001, now - stats["last_log"])
+        frame_rate = stats["frames"] / elapsed
+        sample_rate = stats["samples"] / elapsed
+        dbfs = _dbfs(stats["rms"])
+        log.info(
+            "GO2 WebRTC mic level: rms=%.1f peak=%d dbfs=%.1f frames=%.1f/s pcm_rate=%.0f/s src_rate=%s src_channels=%s state=%s",
+            stats["rms"],
+            stats["peak"],
+            dbfs,
+            frame_rate,
+            sample_rate,
+            stats["source_rate"] or "-",
+            stats["source_channels"] or "-",
+            self._state,
+        )
+        stats["frames"] = 0
+        stats["samples"] = 0
+        stats["last_log"] = now
+
     def close(self):
         pass
+
+
+def _dbfs(rms: float) -> float:
+    if rms <= 0:
+        return -120.0
+    return max(-120.0, 20.0 * np.log10(rms / 32768.0))
 
 
 def _frame_rms(chunk: np.ndarray) -> float:
@@ -287,27 +661,58 @@ def _frame_rms(chunk: np.ndarray) -> float:
 
 
 async def run_webrtc():
-    from unitree_webrtc_connect import UnitreeWebRTCConnection, WebRTCConnectionMethod
+    from unitree_webrtc_connect import DataChannelTimeoutError, NoSdpAnswerError, RobotBusyError
 
-    conn = UnitreeWebRTCConnection(WebRTCConnectionMethod.LocalSTA, ip=ROBOT_IP)
-    speaker = Speaker(conn)
-    pipe = VoicePipeline(speaker=speaker)
+    conn = None
+    pipe = None
     connected = False
 
     try:
-        await conn.connect()
-        connected = True
-        conn.audio.switchAudioChannel(True)
+        for attempt in range(1, WEBRTC_CONNECT_RETRIES + 1):
+            conn = _make_go2_webrtc_connection()
+            try:
+                log.info("WebRTC connect attempt %s/%s", attempt, WEBRTC_CONNECT_RETRIES)
+                await conn.connect()
+                connected = True
+                break
+            except RobotBusyError:
+                raise
+            except (DataChannelTimeoutError, NoSdpAnswerError, TimeoutError, OSError) as exc:
+                await _safe_disconnect_webrtc(conn)
+                if attempt >= WEBRTC_CONNECT_RETRIES:
+                    raise
+                delay_s = WEBRTC_RETRY_DELAY_MS / 1000.0
+                log.warning(
+                    "WebRTC connect attempt %s/%s failed: %s; retrying in %.1fs",
+                    attempt,
+                    WEBRTC_CONNECT_RETRIES,
+                    exc,
+                    delay_s,
+                )
+                if delay_s > 0:
+                    await asyncio.sleep(delay_s)
+
+        speaker = Speaker(conn)
+        pipe = VoicePipeline(speaker=speaker)
         conn.audio.add_track_callback(pipe.on_audio_frame)
+        conn.audio.switchAudioChannel(True)
         asyncio.create_task(start_cleaner())
         log.info("等待唤醒词 %s...", WAKE_KEYWORD)
         await asyncio.Event().wait()
     except KeyboardInterrupt:
         pass
     finally:
-        pipe.close()
-        if connected:
-            await conn.disconnect()
+        if pipe:
+            pipe.close()
+        if connected and conn:
+            await _safe_disconnect_webrtc(conn)
+
+
+async def _safe_disconnect_webrtc(conn):
+    try:
+        await conn.disconnect()
+    except Exception:
+        log.exception("WebRTC disconnect failed")
 
 
 if __name__ == "__main__":

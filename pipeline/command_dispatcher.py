@@ -10,6 +10,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 import uuid
 from pathlib import Path
@@ -23,6 +24,12 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 COMMAND_OUTPUT_DIR = Path(os.environ.get("COMMAND_OUTPUT_DIR", _PROJECT_ROOT / "output"))
 COMMAND_SERVICE_URL = os.environ.get("COMMAND_SERVICE_URL", "").strip()
 COMMAND_SERVICE_TIMEOUT = float(os.environ.get("COMMAND_SERVICE_TIMEOUT", "5"))
+MOVE_STEP_TIMEOUT_MS = int(os.environ.get("MOVE_STEP_TIMEOUT_MS", "1200"))
+MOVE_DEFAULT_TIMEOUT_MS = int(os.environ.get("MOVE_DEFAULT_TIMEOUT_MS", "1200"))
+AUTO_STAND_BEFORE_MOVE = os.environ.get("AUTO_STAND_BEFORE_MOVE", "1") not in {"0", "false", "False", "no", ""}
+MOVE_PREPARE_DELAY_MS = int(os.environ.get("MOVE_PREPARE_DELAY_MS", "1200"))
+MOVE_REPEAT_COUNT = max(1, int(os.environ.get("MOVE_REPEAT_COUNT", "5")))
+MOVE_REPEAT_INTERVAL_MS = max(0, int(os.environ.get("MOVE_REPEAT_INTERVAL_MS", "150")))
 COMMAND_SUCCESS_AUDIO = os.environ.get(
     "COMMAND_SUCCESS_AUDIO",
     str(_PROJECT_ROOT / "audio" / "xuanxinghuida.mp3"),
@@ -31,6 +38,54 @@ COMMAND_FAILED_AUDIO = os.environ.get(
     "COMMAND_FAILED_AUDIO",
     str(_PROJECT_ROOT / "audio" / "command_failed.wav"),
 )
+SUPPORTED_INTENTS = {
+    "stop",
+    "move_forward",
+    "move_backward",
+    "move_left",
+    "move_right",
+    "turn_left",
+    "turn_right",
+    "stand_up",
+    "sit_down",
+    "lie_down",
+    "greet",
+    "shake_body",
+    "stretch",
+}
+MOTION_COMMAND_TYPES = {
+    "Move": "move",
+    "MoveForward": "move_forward",
+    "MoveBackward": "move_backward",
+    "MoveLeft": "move_left",
+    "MoveRight": "move_right",
+    "TurnLeft": "turn_left",
+    "TurnRight": "turn_right",
+    "StandUp": "stand_up",
+    "StandDown": "stand_down",
+    "Sit": "sit",
+    "LieDown": "lie_down",
+    "Stop": "stop",
+    "StopMove": "stop",
+    "Greet": "greet",
+    "ShakeBody": "shake_body",
+    "Stretch": "stretch",
+}
+INTENT_COMMAND_TYPES = {
+    "move_forward": "move_forward",
+    "move_backward": "move_backward",
+    "move_left": "move_left",
+    "move_right": "move_right",
+    "turn_left": "turn_left",
+    "turn_right": "turn_right",
+    "stand_up": "stand_up",
+    "sit_down": "stand_down",
+    "lie_down": "lie_down",
+    "stop": "stop",
+    "greet": "greet",
+    "shake_body": "shake_body",
+    "stretch": "stretch",
+}
 
 
 class CommandDispatcher:
@@ -123,23 +178,181 @@ class CommandDispatcher:
         history.write_text(data, encoding="utf-8")
 
     def _is_actionable(self, command: dict) -> bool:
+        if not isinstance(command, dict):
+            return False
         intent = (command or {}).get("intent")
-        return bool(intent and intent != "unknown")
+        if not intent or intent == "unknown" or intent not in SUPPORTED_INTENTS:
+            return False
+
+        slots = command.get("slots")
+        if slots is not None and not isinstance(slots, dict):
+            return False
+
+        model_command = command.get("command")
+        if model_command is None:
+            return True
+        if not isinstance(model_command, dict):
+            return False
+        if model_command.get("type") != "cmd":
+            return False
+        payload = model_command.get("payload")
+        if not isinstance(payload, dict):
+            return False
+        command_type = payload.get("command_type")
+        if not isinstance(command_type, str) or not command_type.strip():
+            return False
+        payload_json = payload.get("payload_json")
+        return payload_json is None or isinstance(payload_json, dict)
 
     async def _post_to_service(self, envelope: dict) -> dict:
+        payload = self._make_service_payload(envelope)
+        if payload.get("command_type") == "move":
+            return await self._post_move_sequence(payload)
+
+        return await self._post_payload(payload)
+
+    async def _post_move_sequence(self, payload: dict) -> dict:
+        sequence = []
+        if AUTO_STAND_BEFORE_MOVE:
+            prepare_payload = {"command_type": "stand_up"}
+            prepare_result = await self._post_payload(prepare_payload)
+            sequence.append(prepare_result)
+            if not self._service_ok(prepare_result):
+                return {
+                    "sequence": sequence,
+                    "http_status": prepare_result.get("http_status"),
+                    "request_json": payload,
+                    "json": prepare_result.get("json"),
+                    "body": prepare_result.get("body", ""),
+                }
+
+            if MOVE_PREPARE_DELAY_MS > 0:
+                await asyncio.sleep(MOVE_PREPARE_DELAY_MS / 1000.0)
+
+        move_result = {}
+        for index in range(MOVE_REPEAT_COUNT):
+            log.info("Move repeat %s/%s", index + 1, MOVE_REPEAT_COUNT)
+            move_result = await self._post_payload(payload)
+            sequence.append(dict(move_result))
+            if not self._service_ok(move_result):
+                move_result["sequence"] = sequence
+                return move_result
+            if index < MOVE_REPEAT_COUNT - 1 and MOVE_REPEAT_INTERVAL_MS > 0:
+                await asyncio.sleep(MOVE_REPEAT_INTERVAL_MS / 1000.0)
+
+        move_result["sequence"] = sequence
+        return move_result
+
+    async def _post_payload(self, payload: dict) -> dict:
         timeout = aiohttp.ClientTimeout(total=COMMAND_SERVICE_TIMEOUT)
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(COMMAND_SERVICE_URL, json=envelope) as resp:
+            log.info("Posting motion command to %s: %s", COMMAND_SERVICE_URL, json.dumps(payload, ensure_ascii=False))
+            async with session.post(COMMAND_SERVICE_URL, json=payload) as resp:
                 text = await resp.text()
                 result = {
                     "http_status": resp.status,
                     "body": text,
+                    "request_json": payload,
                 }
                 try:
                     result["json"] = json.loads(text) if text else {}
                 except json.JSONDecodeError:
                     pass
                 return result
+
+    def _make_service_payload(self, envelope: dict) -> dict:
+        command = envelope.get("command") if isinstance(envelope, dict) else {}
+        if not isinstance(command, dict):
+            return {}
+
+        command_type = self._extract_motion_command_type(command)
+        payload = {"command_type": command_type}
+
+        payload_json = self._extract_payload_json(command)
+        if payload_json:
+            payload.update(payload_json)
+        if command_type == "move":
+            payload = self._normalize_move_payload(payload, command, envelope)
+        return payload
+
+    def _normalize_move_payload(self, payload: dict, command: dict, envelope: dict) -> dict:
+        out = dict(payload)
+        if "vyaw" in out and "wz" not in out:
+            out["wz"] = out.pop("vyaw")
+        out.setdefault("vx", 0)
+        out.setdefault("vy", 0)
+        out.setdefault("wz", 0)
+
+        slots = command.get("slots") if isinstance(command.get("slots"), dict) else {}
+        steps = slots.get("steps")
+        if steps is None:
+            steps = _extract_steps_from_text(
+                envelope.get("normalized_text")
+                or command.get("normalized")
+                or command.get("raw")
+                or envelope.get("asr_text")
+                or ""
+            )
+        try:
+            steps = int(steps) if steps is not None else None
+        except (TypeError, ValueError):
+            steps = None
+        if "timeout_ms" not in out:
+            out["timeout_ms"] = max(1, steps) * MOVE_STEP_TIMEOUT_MS if steps else MOVE_DEFAULT_TIMEOUT_MS
+        out["payload_json"] = {
+            "vx": out["vx"],
+            "vy": out["vy"],
+            "wz": out["wz"],
+            "timeout_ms": out["timeout_ms"],
+        }
+        return out
+
+    def _extract_motion_command_type(self, command: dict) -> str:
+        slots = command.get("slots") if isinstance(command.get("slots"), dict) else {}
+        raw_type = slots.get("command_type")
+        if not raw_type:
+            model_command = command.get("command")
+            if isinstance(model_command, dict):
+                payload = model_command.get("payload")
+                if isinstance(payload, dict):
+                    raw_type = payload.get("command_type")
+        if isinstance(raw_type, str) and raw_type.strip():
+            normalized = self._normalize_command_type(raw_type)
+            if normalized:
+                return normalized
+
+        intent = command.get("intent")
+        return INTENT_COMMAND_TYPES.get(str(intent), str(intent or "unknown"))
+
+    def _extract_payload_json(self, command: dict) -> dict:
+        model_command = command.get("command")
+        if isinstance(model_command, dict):
+            payload = model_command.get("payload")
+            if isinstance(payload, dict) and isinstance(payload.get("payload_json"), dict):
+                return dict(payload["payload_json"])
+        slots = command.get("slots")
+        if isinstance(slots, dict):
+            return {
+                key: value
+                for key, value in slots.items()
+                if key not in {"command_type", "direction", "steps", "angle"}
+            }
+        return {}
+
+    def _normalize_command_type(self, command_type: str) -> str:
+        if command_type in MOTION_COMMAND_TYPES:
+            return MOTION_COMMAND_TYPES[command_type]
+        chars = []
+        for index, ch in enumerate(command_type.strip()):
+            if ch in {"-", " ", "."}:
+                chars.append("_")
+            elif ch == "_":
+                chars.append(ch)
+            elif ch.isupper() and index > 0 and command_type[index - 1].islower():
+                chars.extend(["_", ch.lower()])
+            else:
+                chars.append(ch.lower())
+        return "".join(chars).strip("_")
 
     def _service_ok(self, result: dict) -> bool:
         status = int(result.get("http_status") or 0)
@@ -209,3 +422,29 @@ def _play_local_beep_sync(success: bool):
         chunks.append((0.18 * np.sin(2 * np.pi * freq * t)).astype(np.float32))
         chunks.append(np.zeros(int(sample_rate * 0.06), dtype=np.float32))
     sd.play(np.concatenate(chunks), sample_rate, blocking=True)
+
+
+def _extract_steps_from_text(text: str):
+    if not text:
+        return None
+    match = re.search(r"(\d+)\s*步", text)
+    if match:
+        return int(match.group(1))
+    numbers = {
+        "一": 1,
+        "两": 2,
+        "二": 2,
+        "俩": 2,
+        "三": 3,
+        "四": 4,
+        "五": 5,
+        "六": 6,
+        "七": 7,
+        "八": 8,
+        "九": 9,
+        "十": 10,
+    }
+    for word, value in numbers.items():
+        if f"{word}步" in text:
+            return value
+    return None

@@ -33,7 +33,7 @@ faulthandler.enable(all_threads=True)
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_ASR_MODEL = os.path.join(PROJECT_ROOT, "models", "asr")
 DEFAULT_NLU_MODEL = os.path.join(PROJECT_ROOT, "models", "nlu")
-DEFAULT_NLU_TOKENIZER = os.path.join(PROJECT_ROOT, "nlu", "tokenizer")
+DEFAULT_NLU_TOKENIZER = os.path.join(DEFAULT_NLU_MODEL, "tokenizer")
 DEFAULT_CONFIG_PATH = os.path.join(PROJECT_ROOT, "config.yaml")
 DEFAULT_SERVICE_TIMEOUT = float(os.environ.get("SERVICE_START_TIMEOUT", "120"))
 CHILD_PROCS = []
@@ -41,23 +41,54 @@ _CLEANING_UP = False
 
 CONFIG_ENV_MAP = {
     ("robot", "ip"): "UNITREE_ROBOT_IP",
+    ("robot", "connection_method"): "UNITREE_WEBRTC_METHOD",
+    ("robot", "serial_number"): "UNITREE_ROBOT_SERIAL_NUMBER",
+    ("robot", "aes_128_key"): "UNITREE_AES_128_KEY",
+    ("robot", "username"): "UNITREE_USERNAME",
+    ("robot", "password"): "UNITREE_PASSWORD",
+    ("robot", "region"): "UNITREE_REGION",
+    ("robot", "device_type"): "UNITREE_DEVICE_TYPE",
+    ("robot", "datachannel_timeout"): "UNITREE_WEBRTC_TIMEOUT",
+    ("robot", "connect_retries"): "UNITREE_WEBRTC_CONNECT_RETRIES",
+    ("robot", "retry_delay_ms"): "UNITREE_WEBRTC_RETRY_DELAY_MS",
+    ("robot", "signaling_timeout"): "UNITREE_SIGNALING_TIMEOUT",
+    ("robot", "set_remote_timeout"): "UNITREE_SET_REMOTE_TIMEOUT",
+    ("robot", "filter_remote_candidates"): "UNITREE_FILTER_REMOTE_CANDIDATES",
+    ("robot", "local_ip"): "UNITREE_WEBRTC_LOCAL_IP",
+    ("robot", "auto_local_ip"): "UNITREE_WEBRTC_AUTO_LOCAL_IP",
     ("kws", "model_dir"): "KWS_MODEL_DIR",
     ("wake", "keyword"): "WAKE_KEYWORD",
     ("wake", "backend"): "WAKE_BACKEND",
     ("wake", "text"): "WAKE_TEXT",
+    ("wake", "aliases"): "WAKE_ALIASES",
     ("wake", "audio"): "WAKE_AUDIO",
+    ("wake", "feedback_enabled"): "WAKE_FEEDBACK_ENABLED",
     ("services", "asr_url"): "ASR_URL",
+    ("services", "asr_timeout"): "ASR_TIMEOUT",
     ("services", "nlu_url"): "NLU_URL",
     ("command", "output_dir"): "COMMAND_OUTPUT_DIR",
     ("command", "service_url"): "COMMAND_SERVICE_URL",
     ("command", "service_timeout"): "COMMAND_SERVICE_TIMEOUT",
+    ("command", "move_step_timeout_ms"): "MOVE_STEP_TIMEOUT_MS",
+    ("command", "move_default_timeout_ms"): "MOVE_DEFAULT_TIMEOUT_MS",
+    ("command", "auto_stand_before_move"): "AUTO_STAND_BEFORE_MOVE",
+    ("command", "move_prepare_delay_ms"): "MOVE_PREPARE_DELAY_MS",
+    ("command", "move_repeat_count"): "MOVE_REPEAT_COUNT",
+    ("command", "move_repeat_interval_ms"): "MOVE_REPEAT_INTERVAL_MS",
     ("command", "success_audio"): "COMMAND_SUCCESS_AUDIO",
     ("command", "failed_audio"): "COMMAND_FAILED_AUDIO",
+    ("command", "rules_enabled"): "COMMAND_RULES_ENABLED",
+    ("command", "feedback_suppress_ms"): "COMMAND_FEEDBACK_SUPPRESS_MS",
     ("microphone", "device"): "MIC_DEVICE",
     ("microphone", "channel"): "MIC_CHANNEL",
     ("microphone", "level_log_interval"): "MIC_LEVEL_LOG_INTERVAL",
     ("microphone", "denoise"): "AUDIO_DENOISE",
     ("microphone", "gain"): "MIC_GAIN",
+    ("microphone", "webrtc_gain"): "WEBRTC_AUDIO_GAIN",
+    ("microphone", "webrtc_denoise"): "WEBRTC_AUDIO_DENOISE",
+    ("microphone", "webrtc_target_peak"): "WEBRTC_TARGET_PEAK",
+    ("microphone", "webrtc_noise_gate_rms"): "WEBRTC_NOISE_GATE_RMS",
+    ("microphone", "webrtc_noise_gate_attenuation"): "WEBRTC_NOISE_GATE_ATTENUATION",
     ("microphone", "noise_calibration_seconds"): "NOISE_CALIBRATION_SECONDS",
     ("microphone", "noise_gate_multiplier"): "NOISE_GATE_MULTIPLIER",
     ("microphone", "noise_gate_min_rms"): "NOISE_GATE_MIN_RMS",
@@ -82,6 +113,10 @@ CONFIG_ENV_MAP = {
     ("vad", "aggressiveness"): "VAD_AGGRESSIVENESS",
     ("vad", "silence_rms"): "VAD_SILENCE_RMS",
     ("vad", "silence_multiplier"): "VAD_SILENCE_MULTIPLIER",
+    ("vad", "command_silence_rms"): "COMMAND_VAD_SILENCE_RMS",
+    ("vad", "command_silence_multiplier"): "COMMAND_VAD_SILENCE_MULTIPLIER",
+    ("vad", "debug"): "VAD_DEBUG",
+    ("vad", "debug_interval"): "VAD_DEBUG_INTERVAL",
     ("vad", "silence_timeout_ms"): "VAD_SILENCE_TIMEOUT_MS",
     ("vad", "min_speech_ms"): "VAD_MIN_SPEECH_MS",
     ("vad", "command_listen_timeout_ms"): "COMMAND_LISTEN_TIMEOUT_MS",
@@ -212,16 +247,16 @@ def _start_parent_watchdog(name):
 def _start_asr_server(model_dir, host, port, use_gpu):
     """在子进程中启动 ASR HTTP 服务"""
     _start_parent_watchdog("ASR")
-    from asr.engine import load_session, load_tokens
+    from asr.engine import load_session
     from asr.server import run_serve
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [ASR] %(message)s")
-    sess, neg_mean, inv_stddev = load_session(model_dir, use_gpu=use_gpu)
-    tokens = load_tokens(model_dir)
-    run_serve(sess, neg_mean, inv_stddev, tokens, host, port)
+    logging.getLogger("run").info("ASR model: Qwen3-ASR ONNX")
+    engine = load_session(model_dir, use_gpu=use_gpu)
+    run_serve(engine, host, port)
 
 
-def _start_nlu_server(model_dir, tokenizer_dir, host, port):
+def _start_nlu_server(model_dir, tokenizer_dir, host, port, use_gpu=False):
     """在子进程中启动 NLU HTTP 服务"""
     _start_parent_watchdog("NLU")
     from nlu.engine import load_sessions, load_tokenizer
@@ -229,7 +264,7 @@ def _start_nlu_server(model_dir, tokenizer_dir, host, port):
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [NLU] %(message)s")
     tokenizer = load_tokenizer(tokenizer_dir)
-    enc_sess, dec_sess = load_sessions(model_dir)
+    enc_sess, dec_sess = load_sessions(model_dir, use_gpu=use_gpu)
     run_serve(enc_sess, dec_sess, tokenizer, host, port)
 
 
@@ -269,6 +304,50 @@ def _ensure_port_available(name, host, port):
             ) from exc
 
 
+def _tcp_port_open(ip: str, port: int, timeout: float = 1.5) -> bool:
+    try:
+        with socket.create_connection((ip, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def _preflight_webrtc(args) -> bool:
+    method = str(os.environ.get("UNITREE_WEBRTC_METHOD", "LocalSTA") or "LocalSTA").lower()
+    if method in {"localap", "ap"}:
+        ip = "192.168.12.1"
+    elif method in {"remote", "cloud"}:
+        sn = os.environ.get("UNITREE_ROBOT_SERIAL_NUMBER", "").strip()
+        username = os.environ.get("UNITREE_USERNAME", "").strip()
+        password = os.environ.get("UNITREE_PASSWORD", "").strip()
+        ok = bool(sn and username and password)
+        if ok:
+            log.info("WebRTC Remote 预检通过: serial=%s username=%s", sn, username)
+        else:
+            log.error("WebRTC Remote 需要 serial_number/username/password")
+        return ok
+    else:
+        ip = os.environ.get("UNITREE_ROBOT_IP", "").strip() or str(_cfg(args.config_data, "robot", "ip", default="")).strip()
+
+    if not ip:
+        log.error("WebRTC LocalSTA 需要 robot.ip，或者提供 robot.serial_number 进行局域网发现")
+        return False
+
+    ports = (9991, 8081)
+    open_ports = [port for port in ports if _tcp_port_open(ip, port)]
+    if open_ports:
+        log.info("WebRTC Local 预检通过: %s open_ports=%s", ip, open_ports)
+        return True
+
+    log.error(
+        "WebRTC Local 预检失败: %s 的 9991/8081 都无法连接。请检查 robot.ip、电脑和机器狗是否在同一网络、"
+        "机器狗是否开机且未被官方 App 占用；如果连接机器狗热点，尝试 connection_method=LocalAP；"
+        "如果走云端，改用 connection_method=Remote 并配置 serial_number/username/password。",
+        ip,
+    )
+    return False
+
+
 def main():
     _install_cleanup_handlers()
 
@@ -290,6 +369,8 @@ def main():
     parser.add_argument("--nlu-port", type=int, default=None)
     parser.add_argument("--host", default=None)
     parser.add_argument("--gpu", action="store_true", help="使用 GPU 推理")
+    parser.add_argument("--preflight-only", action="store_true", help="仅执行启动前连通性检查，不启动 ASR/NLU/Pipeline")
+    parser.add_argument("--skip-preflight", action="store_true", help="跳过 WebRTC 连通性预检")
     denoise = parser.add_mutually_exclusive_group()
     denoise.add_argument("--denoise", action="store_true", help="开启本机麦克风轻量降噪")
     denoise.add_argument("--no-denoise", action="store_true", help="关闭本机麦克风轻量降噪")
@@ -311,6 +392,7 @@ def main():
     args = parser.parse_args()
 
     config = _load_config(args.config)
+    args.config_data = config
     _apply_config_env(config)
 
     server_config = _cfg(config, "server", default={}) or {}
@@ -360,13 +442,22 @@ def main():
     if args.vad_min_speech_ms is not None:
         os.environ["VAD_MIN_SPEECH_MS"] = str(args.vad_min_speech_ms)
 
+    if args.preflight_only:
+        ok = True
+        if args.webrtc:
+            ok = _preflight_webrtc(args)
+        if ok:
+            log.info("预检通过")
+            return
+        raise SystemExit(2)
+
     # ── 单服务模式 ──────────────────────────────────────────────────────────
     if args.serve_asr:
         _start_asr_server(args.asr_model, args.host, args.asr_port, args.gpu)
         return
 
     if args.serve_nlu:
-        _start_nlu_server(args.nlu_model, args.nlu_tokenizer, args.host, args.nlu_port)
+        _start_nlu_server(args.nlu_model, args.nlu_tokenizer, args.host, args.nlu_port, args.gpu)
         return
 
     # ── Pipeline-only 模式 ─────────────────────────────────────────────────
@@ -385,12 +476,16 @@ def main():
     # ── 全量启动：ASR + NLU + Pipeline ────────────────────────────────────
     log.info("启动全部服务...")
 
+    if args.webrtc and not args.skip_preflight and not _preflight_webrtc(args):
+        raise SystemExit(2)
+
     _ensure_port_available("ASR", args.host, args.asr_port)
     _ensure_port_available("NLU", args.host, args.nlu_port)
 
-    # 设置 Pipeline 的服务地址环境变量
-    os.environ.setdefault("ASR_URL", f"http://127.0.0.1:{args.asr_port}/asr")
-    os.environ.setdefault("NLU_URL", f"http://127.0.0.1:{args.nlu_port}/nlu")
+    # Full startup owns these child services, so point the pipeline at the
+    # freshly started local ports even if the shell has stale URLs exported.
+    os.environ["ASR_URL"] = f"http://127.0.0.1:{args.asr_port}/asr"
+    os.environ["NLU_URL"] = f"http://127.0.0.1:{args.nlu_port}/nlu"
 
     asr_proc = multiprocessing.Process(
         target=_start_asr_server,
@@ -399,7 +494,7 @@ def main():
     )
     nlu_proc = multiprocessing.Process(
         target=_start_nlu_server,
-        args=(args.nlu_model, args.nlu_tokenizer, args.host, args.nlu_port),
+        args=(args.nlu_model, args.nlu_tokenizer, args.host, args.nlu_port, args.gpu),
         daemon=True,
     )
 

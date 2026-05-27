@@ -5,29 +5,64 @@ server:
   service_timeout: 120
   gpu: false
 
+services:
+  asr_timeout: 90
+
 audio:
-  source: hardware_serial
+  source: webrtc
 
 models:
   asr: models/asr
   nlu: models/nlu
-  nlu_tokenizer: nlu/tokenizer
+  nlu_tokenizer: models/nlu/tokenizer
 
 robot:
-  ip: 192.168.8.181
+  ip: 10.10.20.66
+  connection_method: LocalSTA
+  serial_number:
+  aes_128_key:
+  username:
+  password:
+  region: global
+  device_type: Go2
+  datachannel_timeout: 30
+  connect_retries: 3
+  retry_delay_ms: 5000
+  signaling_timeout: 5
+  set_remote_timeout: 15
+  filter_remote_candidates: true
+  local_ip:
+  auto_local_ip: false
 
 kws:
   model_dir: models/kws
 
 wake:
   backend: asr
-  keyword: 你好花花
+  keyword: 你好曼波
+  feedback_enabled: false
+  aliases:
+    - 你好曼波
+    - 曼波
+    - 慢播
+    - 快播
+    - 那波
+    - 南波
+    - 慢波
+    - 曼播
+    - 你好慢播
+    - 你好快播
+    - 你好那波
+    - 你好南波
   text:
-    - 你好花花
-    - 你好，花花
-    - 花花
-    - 花花，你好
-  audio: audio/xuanxinghuida.mp3
+    - 你好曼波
+    - 曼波
+    - 你好，曼波
+    - 你好
+    - 你好，小曼
+    - 你好，小曼波
+    - 曼波，你好
+  audio: audio/wolile.mp3
 
 microphone:
   device:
@@ -35,6 +70,11 @@ microphone:
   level_log_interval: 3
   denoise: false
   gain: 1.0
+  webrtc_gain: 1.0
+  webrtc_denoise: true
+  webrtc_target_peak: 12000
+  webrtc_noise_gate_rms: 80
+  webrtc_noise_gate_attenuation: 0.2
   noise_calibration_seconds: 1.0
   noise_gate_multiplier: 2.5
   noise_gate_min_rms: 120
@@ -85,8 +125,12 @@ hardware_serial:
 vad:
   mode: silence
   aggressiveness: 2
+  debug: true
+  debug_interval: 1.0
   silence_rms: 300
   silence_multiplier: 2.5
+  command_silence_rms: 360
+  command_silence_multiplier: 1.15
   silence_timeout_ms: 1800
   min_speech_ms: 240
   command_listen_timeout_ms: 8000
@@ -94,7 +138,15 @@ vad:
 
 command:
   output_dir: output
-  service_url:
+  service_url: http://10.10.20.82:8090/api/v1/local/motion
   service_timeout: 5
-  success_audio: audio/xuanxinghuida.mp3
+  move_step_timeout_ms: 1200
+  move_default_timeout_ms: 1200
+  auto_stand_before_move: true
+  move_prepare_delay_ms: 1200
+  move_repeat_count: 5
+  move_repeat_interval_ms: 150
+  success_audio: audio/wolile.mp3
   failed_audio: audio/command_failed.wav
+  rules_enabled: false
+  feedback_suppress_ms: 1800

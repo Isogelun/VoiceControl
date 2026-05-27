@@ -2,13 +2,13 @@
 name = "voice-control"
 version = "1.0.0"
 description = "宇树 Go2 EDU 机器狗语音控制系统：唤醒词 → VAD → ASR → NLU → 指令"
-requires-python = ">=3.8,<3.11"
+requires-python = ">=3.10,<3.11"
 dependencies = [
     # ASR
-    "onnxruntime==1.14.0",
+    "onnxruntime>=1.23.0,<2",
     "soundfile>=0.13.1",
     "librosa>=0.11.0",
-    "numpy>=1.24.0,<2",
+    "numpy>=1.24.0,<3",
     "python-speech-features>=0.6",
     # NLU
     "transformers",
@@ -20,6 +20,16 @@ dependencies = [
     "pyserial>=3.5",
     "aiohttp",
     "pyyaml>=6.0",
+    # Unitree Go2 WebRTC
+    "aiortc>=1.9.0",
+    "requests",
+    "curl_cffi",
+    "pycryptodome",
+    "cryptography",
+    "packaging",
+    "pydub",
+    "wasmtime",
+    "lz4",
     # HTTP 服务
     "fastapi>=0.100.0",
     "uvicorn>=0.20.0",
@@ -31,4 +41,7 @@ requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["asr*", "nlu*", "pipeline*"]
+include = ["asr*", "nlu*", "pipeline*", "unitree_webrtc_connect*"]
+
+[tool.setuptools.package-data]
+unitree_webrtc_connect = ["lidar/*.wasm"]
