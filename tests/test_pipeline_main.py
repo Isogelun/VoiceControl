@@ -21,6 +21,22 @@ class InlineWakeCommandTests(unittest.TestCase):
 
 
 class CommandParsingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_enter_listening_plays_wake_audio_through_dispatcher(self):
+        pipe = VoicePipeline.__new__(VoicePipeline)
+        pipe.dispatcher = mock.Mock()
+        pipe.dispatcher.play_audio = mock.AsyncMock()
+        pipe._reset_speech_capture = mock.Mock()
+
+        with mock.patch.object(pipeline_main, "WAKE_FEEDBACK_ENABLED", True):
+            with mock.patch.object(pipeline_main, "WAKE_AUDIO", "audio/wake.mp3"):
+                with mock.patch.object(pipeline_main.asyncio, "create_task") as create_task:
+                    pipe._enter_listening({"source": "test"})
+
+        self.assertEqual(pipe._state, "listening")
+        self.assertEqual(pipe._wake_metadata, {"source": "test"})
+        create_task.assert_called_once()
+        pipe.dispatcher.play_audio.assert_called_once_with("audio/wake.mp3", success=True)
+
     async def test_process_utterance_uses_nlu_before_rules(self):
         pipe = VoicePipeline.__new__(VoicePipeline)
         pipe._wake_metadata = {"source": "asr"}

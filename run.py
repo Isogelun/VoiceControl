@@ -75,8 +75,14 @@ CONFIG_ENV_MAP = {
     ("command", "move_prepare_delay_ms"): "MOVE_PREPARE_DELAY_MS",
     ("command", "move_repeat_count"): "MOVE_REPEAT_COUNT",
     ("command", "move_repeat_interval_ms"): "MOVE_REPEAT_INTERVAL_MS",
+    ("command", "move_linear_speed"): "MOVE_LINEAR_SPEED",
+    ("command", "move_yaw_speed"): "MOVE_YAW_SPEED",
+    ("command", "move_continuous"): "MOVE_CONTINUOUS",
+    ("command", "move_continuous_fields"): "MOVE_CONTINUOUS_FIELDS",
+    ("command", "move_stop_after_timeout"): "MOVE_STOP_AFTER_TIMEOUT",
     ("command", "success_audio"): "COMMAND_SUCCESS_AUDIO",
     ("command", "failed_audio"): "COMMAND_FAILED_AUDIO",
+    ("command", "action_audio"): "COMMAND_ACTION_AUDIO",
     ("command", "rules_enabled"): "COMMAND_RULES_ENABLED",
     ("command", "feedback_suppress_ms"): "COMMAND_FEEDBACK_SUPPRESS_MS",
     ("microphone", "device"): "MIC_DEVICE",
@@ -176,6 +182,8 @@ def _cfg(config, *keys, default=None):
 def _env_value(value):
     if isinstance(value, bool):
         return "1" if value else "0"
+    if isinstance(value, dict):
+        return json.dumps(value, ensure_ascii=False)
     if isinstance(value, (list, tuple)):
         return ",".join(str(item) for item in value)
     return str(value)
@@ -187,6 +195,11 @@ def _apply_config_env(config):
         if value is not None:
             if env_name in CONFIG_PATH_ENV_NAMES:
                 value = _project_path(value)
+            elif env_name == "COMMAND_ACTION_AUDIO" and isinstance(value, dict):
+                value = {
+                    key: _project_path(path) if path else path
+                    for key, path in value.items()
+                }
             os.environ[env_name] = _env_value(value)
 
 

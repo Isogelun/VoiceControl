@@ -534,8 +534,8 @@ class VoicePipeline:
         self._wake_metadata = wake_metadata or {}
         self._reset_speech_capture()
         log.info("已进入命令监听，请说指令")
-        if WAKE_FEEDBACK_ENABLED and self.speaker and WAKE_AUDIO:
-            asyncio.create_task(self.speaker.play_file(WAKE_AUDIO))
+        if WAKE_FEEDBACK_ENABLED and WAKE_AUDIO:
+            asyncio.create_task(self.dispatcher.play_audio(WAKE_AUDIO, success=True))
 
     def _suppress_feedback_audio(self):
         if COMMAND_FEEDBACK_SUPPRESS_MS <= 0:

@@ -30,6 +30,15 @@ AUTO_STAND_BEFORE_MOVE = os.environ.get("AUTO_STAND_BEFORE_MOVE", "1") not in {"
 MOVE_PREPARE_DELAY_MS = int(os.environ.get("MOVE_PREPARE_DELAY_MS", "1200"))
 MOVE_REPEAT_COUNT = max(1, int(os.environ.get("MOVE_REPEAT_COUNT", "5")))
 MOVE_REPEAT_INTERVAL_MS = max(0, int(os.environ.get("MOVE_REPEAT_INTERVAL_MS", "150")))
+MOVE_LINEAR_SPEED = float(os.environ.get("MOVE_LINEAR_SPEED", "0.2"))
+MOVE_YAW_SPEED = float(os.environ.get("MOVE_YAW_SPEED", "0.5"))
+MOVE_CONTINUOUS = os.environ.get("MOVE_CONTINUOUS", "1") not in {"0", "false", "False", "no", ""}
+MOVE_CONTINUOUS_FIELDS = [
+    field.strip()
+    for field in os.environ.get("MOVE_CONTINUOUS_FIELDS", "continous_move,continuous_move").split(",")
+    if field.strip()
+]
+MOVE_STOP_AFTER_TIMEOUT = os.environ.get("MOVE_STOP_AFTER_TIMEOUT", "1") not in {"0", "false", "False", "no", ""}
 COMMAND_SUCCESS_AUDIO = os.environ.get(
     "COMMAND_SUCCESS_AUDIO",
     str(_PROJECT_ROOT / "audio" / "xuanxinghuida.mp3"),
@@ -38,6 +47,7 @@ COMMAND_FAILED_AUDIO = os.environ.get(
     "COMMAND_FAILED_AUDIO",
     str(_PROJECT_ROOT / "audio" / "command_failed.wav"),
 )
+COMMAND_ACTION_AUDIO = os.environ.get("COMMAND_ACTION_AUDIO", "").strip()
 SUPPORTED_INTENTS = {
     "stop",
     "move_forward",
@@ -86,6 +96,16 @@ INTENT_COMMAND_TYPES = {
     "shake_body": "shake_body",
     "stretch": "stretch",
 }
+MOVE_COMMAND_TYPES = {
+    "move",
+    "move_forward",
+    "move_backward",
+    "move_left",
+    "move_right",
+    "turn_left",
+    "turn_right",
+}
+ACTION_AUDIO_MAP = {}
 
 
 class CommandDispatcher:
@@ -134,21 +154,34 @@ class CommandDispatcher:
 
             envelope["status"] = "completed"
             self._persist(envelope)
-            await self.play_success()
+            await self.play_success(command)
             return envelope
 
         envelope["status"] = "accepted"
         envelope["reason"] = "no_command_service_configured"
         self._persist(envelope)
         log.info("未配置 COMMAND_SERVICE_URL，指令已落盘等待后续服务接入")
-        await self.play_success()
+        await self.play_success(command)
         return envelope
 
-    async def play_success(self):
-        await self._play_feedback(COMMAND_SUCCESS_AUDIO, success=True)
+    async def play_success(self, command: dict = None):
+        await self._play_feedback(self._select_success_audio(command), success=True)
 
     async def play_failure(self):
         await self._play_feedback(COMMAND_FAILED_AUDIO, success=False)
+
+    async def play_audio(self, path: str, success: bool = True):
+        await self._play_feedback(path, success=success)
+
+    def _select_success_audio(self, command: dict = None) -> str:
+        audio_map = _action_audio_map()
+        if isinstance(command, dict):
+            intent = str(command.get("intent") or "").strip()
+            command_type = self._extract_motion_command_type(command)
+            for key in (intent, command_type):
+                if key and audio_map.get(key):
+                    return audio_map[key]
+        return audio_map.get("default") or COMMAND_SUCCESS_AUDIO
 
     def _make_envelope(
         self,
@@ -206,7 +239,7 @@ class CommandDispatcher:
 
     async def _post_to_service(self, envelope: dict) -> dict:
         payload = self._make_service_payload(envelope)
-        if payload.get("command_type") == "move":
+        if payload.get("command_type") in MOVE_COMMAND_TYPES:
             return await self._post_move_sequence(payload)
 
         return await self._post_payload(payload)
@@ -229,19 +262,36 @@ class CommandDispatcher:
             if MOVE_PREPARE_DELAY_MS > 0:
                 await asyncio.sleep(MOVE_PREPARE_DELAY_MS / 1000.0)
 
+        repeat_count = self._move_repeat_count(payload)
         move_result = {}
-        for index in range(MOVE_REPEAT_COUNT):
-            log.info("Move repeat %s/%s", index + 1, MOVE_REPEAT_COUNT)
+        for index in range(repeat_count):
+            log.info("Move repeat %s/%s", index + 1, repeat_count)
             move_result = await self._post_payload(payload)
             sequence.append(dict(move_result))
             if not self._service_ok(move_result):
                 move_result["sequence"] = sequence
                 return move_result
-            if index < MOVE_REPEAT_COUNT - 1 and MOVE_REPEAT_INTERVAL_MS > 0:
+            if index < repeat_count - 1 and MOVE_REPEAT_INTERVAL_MS > 0:
                 await asyncio.sleep(MOVE_REPEAT_INTERVAL_MS / 1000.0)
+
+        if MOVE_STOP_AFTER_TIMEOUT:
+            stop_result = await self._post_payload({"command_type": "stop"})
+            sequence.append(dict(stop_result))
+            if not self._service_ok(stop_result):
+                stop_result["sequence"] = sequence
+                return stop_result
 
         move_result["sequence"] = sequence
         return move_result
+
+    def _move_repeat_count(self, payload: dict) -> int:
+        try:
+            timeout_ms = int(payload.get("timeout_ms") or MOVE_DEFAULT_TIMEOUT_MS)
+        except (TypeError, ValueError):
+            timeout_ms = MOVE_DEFAULT_TIMEOUT_MS
+        if timeout_ms <= 0 or MOVE_REPEAT_INTERVAL_MS <= 0:
+            return MOVE_REPEAT_COUNT
+        return max(MOVE_REPEAT_COUNT, (timeout_ms + MOVE_REPEAT_INTERVAL_MS - 1) // MOVE_REPEAT_INTERVAL_MS)
 
     async def _post_payload(self, payload: dict) -> dict:
         timeout = aiohttp.ClientTimeout(total=COMMAND_SERVICE_TIMEOUT)
@@ -271,12 +321,14 @@ class CommandDispatcher:
         payload_json = self._extract_payload_json(command)
         if payload_json:
             payload.update(payload_json)
-        if command_type == "move":
+        if command_type in MOVE_COMMAND_TYPES:
             payload = self._normalize_move_payload(payload, command, envelope)
         return payload
 
     def _normalize_move_payload(self, payload: dict, command: dict, envelope: dict) -> dict:
         out = dict(payload)
+        original_command_type = str(out.get("command_type") or "")
+        out["command_type"] = "move"
         if "vyaw" in out and "wz" not in out:
             out["wz"] = out.pop("vyaw")
         out.setdefault("vx", 0)
@@ -284,6 +336,7 @@ class CommandDispatcher:
         out.setdefault("wz", 0)
 
         slots = command.get("slots") if isinstance(command.get("slots"), dict) else {}
+        self._apply_default_move_velocity(out, original_command_type, command.get("intent"), slots.get("direction"))
         steps = slots.get("steps")
         if steps is None:
             steps = _extract_steps_from_text(
@@ -299,13 +352,44 @@ class CommandDispatcher:
             steps = None
         if "timeout_ms" not in out:
             out["timeout_ms"] = max(1, steps) * MOVE_STEP_TIMEOUT_MS if steps else MOVE_DEFAULT_TIMEOUT_MS
+        if MOVE_CONTINUOUS:
+            for field in MOVE_CONTINUOUS_FIELDS:
+                out[field] = True
         out["payload_json"] = {
             "vx": out["vx"],
             "vy": out["vy"],
             "wz": out["wz"],
             "timeout_ms": out["timeout_ms"],
         }
+        if MOVE_CONTINUOUS:
+            for field in MOVE_CONTINUOUS_FIELDS:
+                out["payload_json"][field] = True
         return out
+
+    def _apply_default_move_velocity(self, out: dict, command_type: str, intent: str, direction: str):
+        try:
+            has_velocity = any(abs(float(out.get(key, 0) or 0)) > 1e-6 for key in ("vx", "vy", "wz"))
+        except (TypeError, ValueError):
+            has_velocity = False
+        if has_velocity:
+            return
+
+        motion = str(command_type or intent or "").lower()
+        direction = str(direction or "").lower()
+        if motion.endswith("forward") or direction == "forward":
+            out["vx"] = MOVE_LINEAR_SPEED
+        elif motion.endswith("backward") or direction == "backward":
+            out["vx"] = -MOVE_LINEAR_SPEED
+        elif motion.endswith("left") or direction == "left":
+            if "turn" in motion:
+                out["wz"] = MOVE_YAW_SPEED
+            else:
+                out["vy"] = MOVE_LINEAR_SPEED
+        elif motion.endswith("right") or direction == "right":
+            if "turn" in motion:
+                out["wz"] = -MOVE_YAW_SPEED
+            else:
+                out["vy"] = -MOVE_LINEAR_SPEED
 
     def _extract_motion_command_type(self, command: dict) -> str:
         slots = command.get("slots") if isinstance(command.get("slots"), dict) else {}
@@ -422,6 +506,46 @@ def _play_local_beep_sync(success: bool):
         chunks.append((0.18 * np.sin(2 * np.pi * freq * t)).astype(np.float32))
         chunks.append(np.zeros(int(sample_rate * 0.06), dtype=np.float32))
     sd.play(np.concatenate(chunks), sample_rate, blocking=True)
+
+
+def _action_audio_map() -> dict:
+    if not COMMAND_ACTION_AUDIO:
+        return {}
+    if ACTION_AUDIO_MAP:
+        return ACTION_AUDIO_MAP
+
+    try:
+        data = json.loads(COMMAND_ACTION_AUDIO)
+    except json.JSONDecodeError:
+        data = _parse_action_audio_pairs(COMMAND_ACTION_AUDIO)
+    if not isinstance(data, dict):
+        log.warning("COMMAND_ACTION_AUDIO must be a JSON object or key=path list: %s", COMMAND_ACTION_AUDIO)
+        return {}
+
+    for key, value in data.items():
+        if not key or not value:
+            continue
+        ACTION_AUDIO_MAP[str(key).strip()] = _resolve_audio_path(str(value).strip())
+    return ACTION_AUDIO_MAP
+
+
+def _parse_action_audio_pairs(text: str) -> dict:
+    pairs = {}
+    for part in text.split(";"):
+        if not part.strip() or "=" not in part:
+            continue
+        key, value = part.split("=", 1)
+        pairs[key.strip()] = value.strip()
+    return pairs
+
+
+def _resolve_audio_path(path: str) -> str:
+    if not path:
+        return path
+    expanded = os.path.expanduser(path)
+    if os.path.isabs(expanded):
+        return expanded
+    return str(_PROJECT_ROOT / expanded)
 
 
 def _extract_steps_from_text(text: str):

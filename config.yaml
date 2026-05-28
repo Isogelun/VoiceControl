@@ -40,7 +40,7 @@ kws:
 wake:
   backend: asr
   keyword: 你好曼波
-  feedback_enabled: false
+  feedback_enabled: true
   aliases:
     - 你好曼波
     - 曼波
@@ -146,7 +146,28 @@ command:
   move_prepare_delay_ms: 1200
   move_repeat_count: 5
   move_repeat_interval_ms: 150
+  move_linear_speed: 0.2
+  move_yaw_speed: 0.5
+  move_continuous: true
+  move_continuous_fields:
+    - continous_move
+    - continuous_move
+  move_stop_after_timeout: true
   success_audio: audio/wolile.mp3
   failed_audio: audio/command_failed.wav
+  action_audio:
+    move_forward: audio/wolile.mp3
+    move_backward: audio/wolile.mp3
+    move_left: audio/wolile.mp3
+    move_right: audio/wolile.mp3
+    turn_left: audio/wolile.mp3
+    turn_right: audio/wolile.mp3
+    stand_up: audio/wolile.mp3
+    sit_down: audio/wolile.mp3
+    lie_down: audio/wolile.mp3
+    greet: audio/wolile.mp3
+    shake_body: audio/wolile.mp3
+    stretch: audio/wolile.mp3
+    stop: audio/wolile.mp3
   rules_enabled: false
   feedback_suppress_ms: 1800
