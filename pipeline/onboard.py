@@ -17,6 +17,7 @@ import sounddevice as sd
 from .main import VoicePipeline, VAD_SAMPLE_RATE
 from .cleaner import start_cleaner
 from .audio_preprocessor import AudioPreprocessor
+from .respeaker import ReSpeakerDoAMonitor, env_bool
 
 log = logging.getLogger(__name__)
 
@@ -30,6 +31,7 @@ except ValueError:
     log.warning("Invalid MIC_CHANNEL=%r; falling back to 0", MIC_CHANNEL_RAW)
     MIC_CHANNEL = 0
 MIC_LEVEL_LOG_INTERVAL = float(os.environ.get("MIC_LEVEL_LOG_INTERVAL", "3"))
+RESPEAKER_DOA_ENABLED = env_bool("RESPEAKER_DOA_ENABLED", "0")
 
 
 def _resolve_input_device():
@@ -61,7 +63,8 @@ def _resolve_input_device():
 
 async def run_onboard():
     """本机麦克风模式"""
-    pipeline = VoicePipeline()
+    doa_monitor = ReSpeakerDoAMonitor.from_env() if RESPEAKER_DOA_ENABLED else None
+    pipeline = VoicePipeline(metadata_provider=doa_monitor.snapshot if doa_monitor else None)
     preprocessor = AudioPreprocessor.from_env(
         sample_rate=VAD_SAMPLE_RATE,
         frame_samples=MIC_BLOCKSIZE,
@@ -103,6 +106,8 @@ async def run_onboard():
             stream_errors.append(str(exc))
 
     try:
+        if doa_monitor:
+            doa_monitor.start()
         try:
             input_device = _resolve_input_device()
             input_info = sd.query_devices(input_device, kind="input")
@@ -178,6 +183,8 @@ async def run_onboard():
         log.exception("Onboard 麦克风监听异常退出")
         raise
     finally:
+        if doa_monitor:
+            doa_monitor.stop()
         log.info("Onboard 麦克风监听结束")
         pipeline.close()
 

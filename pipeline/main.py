@@ -258,7 +258,7 @@ def _strip_boundary_punctuation(text: str) -> str:
 
 
 class VoicePipeline:
-    def __init__(self, speaker: Speaker = None):
+    def __init__(self, speaker: Speaker = None, metadata_provider=None):
         self.wake_backend = WAKE_BACKEND
         self.wake_texts = _unique_phrases(
             [t.strip() for t in WAKE_TEXT.split(",") if t.strip()]
@@ -276,6 +276,7 @@ class VoicePipeline:
         self.vad = webrtcvad.Vad(VAD_AGGRESSIVENESS) if self.vad_mode == "webrtc" else None
         self._noise_rms = VAD_SILENCE_RMS
         self.speaker = speaker
+        self.metadata_provider = metadata_provider
         self.dispatcher = CommandDispatcher(speaker=speaker)
         self._audio_stats = {
             "frames": 0,
@@ -427,27 +428,25 @@ class VoicePipeline:
             command_text = self._strip_wake_phrase(normalized)
             if command_text:
                 log.info("Wake phrase and command in one utterance: %s", command_text)
-                self._wake_metadata = {
+                self._wake_metadata = self._with_external_metadata({
                     "source": "asr",
                     "keyword": normalized,
                     "asr_text": text,
                     "normalized_text": normalized,
                     "inline_command": True,
-                }
+                })
                 await self._process_command_text(command_text, text, command_text)
                 self._state = "waiting"
                 self._wake_metadata = {}
                 self._reset_speech_capture()
                 return
             log.info("唤醒词 [你好花花] 检测到，开始监听...")
-            self._enter_listening(
-                {
-                    "source": "asr",
-                    "keyword": normalized,
-                    "asr_text": text,
-                    "normalized_text": normalized,
-                }
-            )
+            self._enter_listening({
+                "source": "asr",
+                "keyword": normalized,
+                "asr_text": text,
+                "normalized_text": normalized,
+            })
 
     async def _process_utterance(self, pcm_bytes: bytes):
         try:
@@ -455,6 +454,7 @@ class VoicePipeline:
             text = await call_asr(pcm_bytes)
             log.info("ASR: %s", text)
             if not text:
+                await self.dispatcher.play_unavailable()
                 return
 
             normalized = normalize_asr_text(text)
@@ -469,18 +469,24 @@ class VoicePipeline:
                     log.info("Command text after wake-prefix stripping: %s -> %s", normalized, command_text)
                 else:
                     log.info("Command utterance only contains wake phrase, ignored: %s", normalized)
+                    await self.dispatcher.play_unavailable()
                     return
 
             result = await self._parse_command_with_nlu(command_text)
             log.info("指令 JSON: %s", json.dumps(result, ensure_ascii=False))
-            dispatch_result = await self.dispatcher.dispatch(result, text, command_text, dict(self._wake_metadata))
+            dispatch_result = await self.dispatcher.dispatch(
+                result,
+                text,
+                command_text,
+                self._with_external_metadata(dict(self._wake_metadata)),
+            )
             log.info("指令分发结果: %s", json.dumps(dispatch_result, ensure_ascii=False))
             self._suppress_feedback_audio()
         finally:
             self._wake_metadata = {}
 
     async def _process_command_text(self, command_text: str, asr_text: str, normalized_text: str):
-        wake_metadata = dict(self._wake_metadata)
+        wake_metadata = self._with_external_metadata(dict(self._wake_metadata))
         result = await self._parse_command_with_nlu(command_text)
         log.info("Command JSON: %s", json.dumps(result, ensure_ascii=False))
         dispatch_result = await self.dispatcher.dispatch(result, asr_text, normalized_text, wake_metadata)
@@ -488,8 +494,22 @@ class VoicePipeline:
         self._suppress_feedback_audio()
 
     async def _parse_command_with_nlu(self, text: str) -> dict:
-        result = await call_nlu(text)
-        log.info("NLU model result: %s", json.dumps(result, ensure_ascii=False))
+        try:
+            result = await call_nlu(text)
+            log.info("NLU model result: %s", json.dumps(result, ensure_ascii=False))
+        except Exception as exc:
+            log.exception("NLU failed, using fallback for text: %s", text)
+            fallback = parse_command_rule(text)
+            if fallback:
+                log.info("Rule fallback matched after NLU failure: %s", json.dumps(fallback, ensure_ascii=False))
+                return fallback
+            return {
+                "intent": "unknown",
+                "slots": {},
+                "source": "nlu_error",
+                "error": str(exc),
+                "raw": text,
+            }
         if COMMAND_RULES_ENABLED and (not result or result.get("intent") == "unknown"):
             fallback = parse_command_rule(text)
             if fallback:
@@ -531,11 +551,24 @@ class VoicePipeline:
 
     def _enter_listening(self, wake_metadata: dict = None):
         self._state = "listening"
-        self._wake_metadata = wake_metadata or {}
+        self._wake_metadata = self._with_external_metadata(wake_metadata or {})
         self._reset_speech_capture()
         log.info("已进入命令监听，请说指令")
         if WAKE_FEEDBACK_ENABLED and WAKE_AUDIO:
             asyncio.create_task(self.dispatcher.play_audio(WAKE_AUDIO, success=True))
+
+    def _with_external_metadata(self, metadata: dict) -> dict:
+        out = dict(metadata or {})
+        if not self.metadata_provider:
+            return out
+        try:
+            extra = self.metadata_provider() or {}
+        except Exception:
+            log.exception("Failed to read external voice metadata")
+            return out
+        if extra:
+            out.update(extra)
+        return out
 
     def _suppress_feedback_audio(self):
         if COMMAND_FEEDBACK_SUPPRESS_MS <= 0:

@@ -82,6 +82,7 @@ CONFIG_ENV_MAP = {
     ("command", "move_stop_after_timeout"): "MOVE_STOP_AFTER_TIMEOUT",
     ("command", "success_audio"): "COMMAND_SUCCESS_AUDIO",
     ("command", "failed_audio"): "COMMAND_FAILED_AUDIO",
+    ("command", "unavailable_audio"): "COMMAND_UNAVAILABLE_AUDIO",
     ("command", "action_audio"): "COMMAND_ACTION_AUDIO",
     ("command", "rules_enabled"): "COMMAND_RULES_ENABLED",
     ("command", "feedback_suppress_ms"): "COMMAND_FEEDBACK_SUPPRESS_MS",
@@ -99,6 +100,13 @@ CONFIG_ENV_MAP = {
     ("microphone", "noise_gate_multiplier"): "NOISE_GATE_MULTIPLIER",
     ("microphone", "noise_gate_min_rms"): "NOISE_GATE_MIN_RMS",
     ("microphone", "noise_gate_attenuation"): "NOISE_GATE_ATTENUATION",
+    ("respeaker", "doa_enabled"): "RESPEAKER_DOA_ENABLED",
+    ("respeaker", "doa_required"): "RESPEAKER_DOA_REQUIRED",
+    ("respeaker", "vid"): "RESPEAKER_VID",
+    ("respeaker", "pid"): "RESPEAKER_PID",
+    ("respeaker", "doa_interval"): "RESPEAKER_DOA_INTERVAL",
+    ("respeaker", "doa_log_interval"): "RESPEAKER_DOA_LOG_INTERVAL",
+    ("respeaker", "angle_offset"): "RESPEAKER_ANGLE_OFFSET",
     ("hardware_serial", "port"): "HARDWARE_SERIAL_PORT",
     ("hardware_serial", "baudrate"): "HARDWARE_SERIAL_BAUDRATE",
     ("hardware_serial", "reconnect_interval"): "HARDWARE_SERIAL_RECONNECT_INTERVAL",
@@ -134,6 +142,7 @@ CONFIG_PATH_ENV_NAMES = {
     "COMMAND_OUTPUT_DIR",
     "COMMAND_SUCCESS_AUDIO",
     "COMMAND_FAILED_AUDIO",
+    "COMMAND_UNAVAILABLE_AUDIO",
 }
 
 

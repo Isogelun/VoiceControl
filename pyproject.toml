@@ -17,6 +17,8 @@ dependencies = [
     "webrtcvad",
     "setuptools>=68.0,<81",
     "sounddevice",
+    "pyusb>=1.2.1",
+    "libusb-package; platform_system == 'Windows'",
     "pyserial>=3.5",
     "aiohttp",
     "pyyaml>=6.0",

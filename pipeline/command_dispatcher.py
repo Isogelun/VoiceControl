@@ -47,6 +47,7 @@ COMMAND_FAILED_AUDIO = os.environ.get(
     "COMMAND_FAILED_AUDIO",
     str(_PROJECT_ROOT / "audio" / "command_failed.wav"),
 )
+COMMAND_UNAVAILABLE_AUDIO = os.environ.get("COMMAND_UNAVAILABLE_AUDIO", COMMAND_FAILED_AUDIO)
 COMMAND_ACTION_AUDIO = os.environ.get("COMMAND_ACTION_AUDIO", "").strip()
 SUPPORTED_INTENTS = {
     "stop",
@@ -126,7 +127,7 @@ class CommandDispatcher:
             envelope["reason"] = "unknown_intent"
             self._persist(envelope)
             log.warning("指令无法解析: %s", json.dumps(envelope, ensure_ascii=False))
-            await self.play_failure()
+            await self.play_unavailable()
             return envelope
 
         self._persist(envelope)
@@ -140,7 +141,7 @@ class CommandDispatcher:
                 envelope["error"] = str(exc)
                 self._persist(envelope)
                 log.exception("指令服务调用失败")
-                await self.play_failure()
+                await self.play_unavailable()
                 return envelope
 
             envelope["service_result"] = service_result
@@ -149,7 +150,7 @@ class CommandDispatcher:
                 envelope["reason"] = "service_rejected"
                 self._persist(envelope)
                 log.warning("指令服务拒绝/无法完成: %s", json.dumps(service_result, ensure_ascii=False))
-                await self.play_failure()
+                await self.play_unavailable()
                 return envelope
 
             envelope["status"] = "completed"
@@ -169,6 +170,9 @@ class CommandDispatcher:
 
     async def play_failure(self):
         await self._play_feedback(COMMAND_FAILED_AUDIO, success=False)
+
+    async def play_unavailable(self):
+        await self._play_feedback(COMMAND_UNAVAILABLE_AUDIO, success=False)
 
     async def play_audio(self, path: str, success: bool = True):
         await self._play_feedback(path, success=success)
@@ -191,11 +195,15 @@ class CommandDispatcher:
         wake_metadata: dict = None,
     ) -> dict:
         now = time.time()
+        wake = wake_metadata or {}
+        microphone = _extract_microphone_metadata(wake)
         return {
             "id": uuid.uuid4().hex,
             "created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(now)),
             "status": "pending",
-            "wake": wake_metadata or {},
+            "wake": wake,
+            "microphone": microphone,
+            "audio_direction": _audio_direction_metadata(microphone),
             "asr_text": asr_text,
             "normalized_text": normalized_text,
             "command": command,
@@ -247,7 +255,7 @@ class CommandDispatcher:
     async def _post_move_sequence(self, payload: dict) -> dict:
         sequence = []
         if AUTO_STAND_BEFORE_MOVE:
-            prepare_payload = {"command_type": "stand_up"}
+            prepare_payload = self._inherit_voice_metadata({"command_type": "stand_up"}, payload)
             prepare_result = await self._post_payload(prepare_payload)
             sequence.append(prepare_result)
             if not self._service_ok(prepare_result):
@@ -275,7 +283,7 @@ class CommandDispatcher:
                 await asyncio.sleep(MOVE_REPEAT_INTERVAL_MS / 1000.0)
 
         if MOVE_STOP_AFTER_TIMEOUT:
-            stop_result = await self._post_payload({"command_type": "stop"})
+            stop_result = await self._post_payload(self._inherit_voice_metadata({"command_type": "stop"}, payload))
             sequence.append(dict(stop_result))
             if not self._service_ok(stop_result):
                 stop_result["sequence"] = sequence
@@ -321,6 +329,7 @@ class CommandDispatcher:
         payload_json = self._extract_payload_json(command)
         if payload_json:
             payload.update(payload_json)
+        payload.update(_service_voice_metadata(envelope))
         if command_type in MOVE_COMMAND_TYPES:
             payload = self._normalize_move_payload(payload, command, envelope)
         return payload
@@ -364,6 +373,13 @@ class CommandDispatcher:
         if MOVE_CONTINUOUS:
             for field in MOVE_CONTINUOUS_FIELDS:
                 out["payload_json"][field] = True
+        return out
+
+    def _inherit_voice_metadata(self, payload: dict, source_payload: dict) -> dict:
+        out = dict(payload)
+        for key in ("voice_angle", "voice_raw_angle", "voice_direction", "voice_speech_detected", "voice_doa_source"):
+            if key in source_payload:
+                out[key] = source_payload[key]
         return out
 
     def _apply_default_move_velocity(self, out: dict, command_type: str, intent: str, direction: str):
@@ -546,6 +562,51 @@ def _resolve_audio_path(path: str) -> str:
     if os.path.isabs(expanded):
         return expanded
     return str(_PROJECT_ROOT / expanded)
+
+
+def _extract_microphone_metadata(wake: dict) -> dict:
+    if not isinstance(wake, dict):
+        return {}
+    keys = {
+        "doa_source",
+        "angle",
+        "raw_angle",
+        "speech_detected",
+        "angle_direction",
+        "updated_at",
+    }
+    return {key: wake[key] for key in keys if key in wake}
+
+
+def _service_voice_metadata(envelope: dict) -> dict:
+    mic = envelope.get("microphone") if isinstance(envelope, dict) else {}
+    if not isinstance(mic, dict) or not mic:
+        return {}
+    mapping = {
+        "angle": "voice_angle",
+        "raw_angle": "voice_raw_angle",
+        "angle_direction": "voice_direction",
+        "speech_detected": "voice_speech_detected",
+        "doa_source": "voice_doa_source",
+    }
+    return {
+        dst_key: mic[src_key]
+        for src_key, dst_key in mapping.items()
+        if src_key in mic and mic[src_key] is not None
+    }
+
+
+def _audio_direction_metadata(mic: dict) -> dict:
+    if not isinstance(mic, dict) or not mic:
+        return {}
+    return {
+        "angle": mic.get("angle"),
+        "raw_angle": mic.get("raw_angle"),
+        "direction": mic.get("angle_direction"),
+        "speech_detected": mic.get("speech_detected"),
+        "source": mic.get("doa_source"),
+        "updated_at": mic.get("updated_at"),
+    }
 
 
 def _extract_steps_from_text(text: str):

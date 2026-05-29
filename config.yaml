@@ -62,7 +62,7 @@ wake:
     - 你好，小曼
     - 你好，小曼波
     - 曼波，你好
-  audio: audio/wolile.mp3
+  audio: audio/mabo.mp3
 
 microphone:
   device:
@@ -79,6 +79,15 @@ microphone:
   noise_gate_multiplier: 2.5
   noise_gate_min_rms: 120
   noise_gate_attenuation: 0.15
+
+respeaker:
+  doa_enabled: true
+  doa_required: false
+  vid: 0x2886
+  pid:
+  doa_interval: 0.1
+  doa_log_interval: 3
+  angle_offset: 0
 
 hardware_serial:
   port: auto
@@ -153,21 +162,23 @@ command:
     - continous_move
     - continuous_move
   move_stop_after_timeout: true
-  success_audio: audio/wolile.mp3
-  failed_audio: audio/command_failed.wav
+  success_audio: audio/曼波wow.mp3
+  failed_audio: audio/曼波我嘞个豆.mp3
+  unavailable_audio: audio/曼波哈基米.mp3
+  
   action_audio:
-    move_forward: audio/wolile.mp3
-    move_backward: audio/wolile.mp3
-    move_left: audio/wolile.mp3
-    move_right: audio/wolile.mp3
-    turn_left: audio/wolile.mp3
-    turn_right: audio/wolile.mp3
-    stand_up: audio/wolile.mp3
-    sit_down: audio/wolile.mp3
-    lie_down: audio/wolile.mp3
-    greet: audio/wolile.mp3
-    shake_body: audio/wolile.mp3
-    stretch: audio/wolile.mp3
-    stop: audio/wolile.mp3
+    move_forward: audio/曼波-2026-05-29-10-15-[大喊]-齐步走！.mp3
+    move_backward: audio/曼波-2026-05-29-10-16-退-退-退.mp3
+    move_left: audio/曼波-2026-05-29-10-16-[喊叫]-向左转，齐步走.mp3
+    move_right: audio/曼波-2026-05-29-10-17-[喊叫]-向右转，齐步走.mp3
+    turn_left: audio/曼波-2026-05-29-10-17-[喊叫]-向左转！.mp3
+    turn_right: audio/曼波-2026-05-29-10-17-[喊叫]-向右转！.mp3
+    stand_up: audio/曼波-2026-05-29-10-14-我[强调]立了.mp3
+    sit_down: audio/曼波-2026-05-29-10-18-我蹲了.mp3
+    lie_down: audio/曼波-2026-05-29-10-18-我躺平了.mp3
+    greet: audio/曼波-2026-05-29-10-20-[喊叫]-你好吊毛.mp3
+    shake_body: audio/曼波duang.mp3
+    stretch: audio/曼波傻笑.mp3
+    stop: audio/曼波啊米诺斯.mp3
   rules_enabled: false
   feedback_suppress_ms: 1800
