@@ -43,11 +43,11 @@ ROBOT_PASSWORD = os.environ.get("UNITREE_PASSWORD") or None
 ROBOT_REGION = os.environ.get("UNITREE_REGION", "global")
 ROBOT_DEVICE_TYPE = os.environ.get("UNITREE_DEVICE_TYPE", "Go2")
 WEBRTC_LEVEL_LOG_INTERVAL = float(os.environ.get("WEBRTC_LEVEL_LOG_INTERVAL", os.environ.get("MIC_LEVEL_LOG_INTERVAL", "3")))
-WEBRTC_AUDIO_GAIN = float(os.environ.get("WEBRTC_AUDIO_GAIN", "1.0"))
+WEBRTC_AUDIO_GAIN = float(os.environ.get("WEBRTC_AUDIO_GAIN", "2.2"))
 WEBRTC_AUDIO_DENOISE = os.environ.get("WEBRTC_AUDIO_DENOISE", os.environ.get("AUDIO_DENOISE", "0")) not in {"0", "false", "False", "no"}
-WEBRTC_NOISE_GATE_RMS = float(os.environ.get("WEBRTC_NOISE_GATE_RMS", "80"))
-WEBRTC_NOISE_GATE_ATTENUATION = float(os.environ.get("WEBRTC_NOISE_GATE_ATTENUATION", "0.2"))
-WEBRTC_TARGET_PEAK = float(os.environ.get("WEBRTC_TARGET_PEAK", "12000"))
+WEBRTC_NOISE_GATE_RMS = float(os.environ.get("WEBRTC_NOISE_GATE_RMS", "45"))
+WEBRTC_NOISE_GATE_ATTENUATION = float(os.environ.get("WEBRTC_NOISE_GATE_ATTENUATION", "0.6"))
+WEBRTC_TARGET_PEAK = float(os.environ.get("WEBRTC_TARGET_PEAK", "18000"))
 WEBRTC_CONNECT_RETRIES = max(1, int(os.environ.get("UNITREE_WEBRTC_CONNECT_RETRIES", "3")))
 WEBRTC_RETRY_DELAY_MS = max(0, int(os.environ.get("UNITREE_WEBRTC_RETRY_DELAY_MS", "5000")))
 KWS_MODEL_DIR = os.environ.get("KWS_MODEL_DIR", os.path.join(_PROJECT_ROOT, "models", "kws"))
@@ -70,10 +70,10 @@ VAD_FRAME_MS = 30
 VAD_FRAME_SAMPLES = VAD_SAMPLE_RATE * VAD_FRAME_MS // 1000  # 480
 VAD_MODE = os.environ.get("VAD_MODE", "silence").lower()
 VAD_AGGRESSIVENESS = int(os.environ.get("VAD_AGGRESSIVENESS", "2"))
-VAD_SILENCE_RMS = float(os.environ.get("VAD_SILENCE_RMS", "300"))
-VAD_SILENCE_MULTIPLIER = float(os.environ.get("VAD_SILENCE_MULTIPLIER", "2.5"))
-COMMAND_VAD_SILENCE_RMS = float(os.environ.get("COMMAND_VAD_SILENCE_RMS", "360"))
-COMMAND_VAD_SILENCE_MULTIPLIER = float(os.environ.get("COMMAND_VAD_SILENCE_MULTIPLIER", "1.15"))
+VAD_SILENCE_RMS = float(os.environ.get("VAD_SILENCE_RMS", "180"))
+VAD_SILENCE_MULTIPLIER = float(os.environ.get("VAD_SILENCE_MULTIPLIER", "2.0"))
+COMMAND_VAD_SILENCE_RMS = float(os.environ.get("COMMAND_VAD_SILENCE_RMS", "160"))
+COMMAND_VAD_SILENCE_MULTIPLIER = float(os.environ.get("COMMAND_VAD_SILENCE_MULTIPLIER", "1.05"))
 VAD_DEBUG = os.environ.get("VAD_DEBUG", "0") not in {"0", "false", "False", "no", ""}
 VAD_DEBUG_INTERVAL = float(os.environ.get("VAD_DEBUG_INTERVAL", "1.0"))
 SILENCE_TIMEOUT_MS = int(os.environ.get("VAD_SILENCE_TIMEOUT_MS", "1200"))
@@ -288,6 +288,8 @@ class VoicePipeline:
             "samples": 0,
             "rms": 0.0,
             "peak": 0,
+            "max_rms": 0.0,
+            "max_peak": 0,
             "source_rate": 0,
             "source_channels": 0,
             "last_log": time.monotonic(),
@@ -308,6 +310,14 @@ class VoicePipeline:
             SILENCE_TIMEOUT_MS,
             COMMAND_SILENCE_TIMEOUT_MS,
             MIN_SPEECH_MS,
+        )
+        log.info(
+            "WebRTC audio: gain=%.2f denoise=%s gate_rms=%.1f gate_attenuation=%.2f target_peak=%.0f",
+            WEBRTC_AUDIO_GAIN,
+            WEBRTC_AUDIO_DENOISE,
+            WEBRTC_NOISE_GATE_RMS,
+            WEBRTC_NOISE_GATE_ATTENUATION,
+            WEBRTC_TARGET_PEAK,
         )
 
     async def on_audio_frame(self, frame):
@@ -642,10 +652,7 @@ class VoicePipeline:
             return is_speech
 
         rms = _frame_rms(chunk)
-        if self._state == "listening":
-            threshold = max(COMMAND_VAD_SILENCE_RMS, self._noise_rms * COMMAND_VAD_SILENCE_MULTIPLIER)
-        else:
-            threshold = max(VAD_SILENCE_RMS, self._noise_rms * VAD_SILENCE_MULTIPLIER)
+        threshold = self._current_speech_threshold()
         is_speech = rms >= threshold
         self._log_vad_decision(rms=rms, threshold=threshold, is_speech=is_speech, mode="silence")
         if not is_speech:
@@ -682,8 +689,12 @@ class VoicePipeline:
         stats["samples"] += int(pcm.size)
         if pcm.size:
             x = pcm.astype(np.float32)
-            stats["rms"] = float(np.sqrt(np.mean(x * x)))
-            stats["peak"] = int(np.max(np.abs(pcm)))
+            current_rms = float(np.sqrt(np.mean(x * x)))
+            current_peak = int(np.max(np.abs(pcm)))
+            stats["rms"] = current_rms
+            stats["peak"] = current_peak
+            stats["max_rms"] = max(float(stats.get("max_rms", 0.0)), current_rms)
+            stats["max_peak"] = max(int(stats.get("max_peak", 0)), current_peak)
         stats["source_rate"] = int(getattr(frame, "sample_rate", 0) or 0)
         layout = getattr(frame, "layout", None)
         channels = getattr(layout, "channels", None)
@@ -699,11 +710,17 @@ class VoicePipeline:
         frame_rate = stats["frames"] / elapsed
         sample_rate = stats["samples"] / elapsed
         dbfs = _dbfs(stats["rms"])
+        threshold = self._current_speech_threshold()
+        margin = stats["max_rms"] / threshold if threshold > 0 else 0.0
         log.info(
-            "GO2 WebRTC mic level: rms=%.1f peak=%d dbfs=%.1f frames=%.1f/s pcm_rate=%.0f/s src_rate=%s src_channels=%s state=%s",
+            "GO2 WebRTC mic level: rms=%.1f max_rms=%.1f peak=%d max_peak=%d dbfs=%.1f threshold=%.1f margin=%.2fx frames=%.1f/s pcm_rate=%.0f/s src_rate=%s src_channels=%s state=%s",
             stats["rms"],
+            stats["max_rms"],
             stats["peak"],
+            stats["max_peak"],
             dbfs,
+            threshold,
+            margin,
             frame_rate,
             sample_rate,
             stats["source_rate"] or "-",
@@ -712,7 +729,14 @@ class VoicePipeline:
         )
         stats["frames"] = 0
         stats["samples"] = 0
+        stats["max_rms"] = 0.0
+        stats["max_peak"] = 0
         stats["last_log"] = now
+
+    def _current_speech_threshold(self) -> float:
+        if self._state == "listening":
+            return max(COMMAND_VAD_SILENCE_RMS, self._noise_rms * COMMAND_VAD_SILENCE_MULTIPLIER)
+        return max(VAD_SILENCE_RMS, self._noise_rms * VAD_SILENCE_MULTIPLIER)
 
     def close(self):
         try:

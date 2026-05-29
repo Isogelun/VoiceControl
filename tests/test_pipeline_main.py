@@ -129,6 +129,25 @@ class CommandParsingTests(unittest.IsolatedAsyncioTestCase):
         self.assertLess(trimmed.size, pcm.size)
         self.assertGreaterEqual(trimmed.size, speech.size)
 
+    async def test_current_speech_threshold_uses_command_threshold_while_listening(self):
+        pipe = VoicePipeline.__new__(VoicePipeline)
+        pipe._noise_rms = 100.0
+
+        pipe._state = "waiting"
+        self.assertEqual(
+            pipe._current_speech_threshold(),
+            max(pipeline_main.VAD_SILENCE_RMS, 100.0 * pipeline_main.VAD_SILENCE_MULTIPLIER),
+        )
+
+        pipe._state = "listening"
+        self.assertEqual(
+            pipe._current_speech_threshold(),
+            max(
+                pipeline_main.COMMAND_VAD_SILENCE_RMS,
+                100.0 * pipeline_main.COMMAND_VAD_SILENCE_MULTIPLIER,
+            ),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -70,11 +70,11 @@ microphone:
   level_log_interval: 3
   denoise: false
   gain: 1.0
-  webrtc_gain: 1.0
-  webrtc_denoise: true
-  webrtc_target_peak: 12000
-  webrtc_noise_gate_rms: 80
-  webrtc_noise_gate_attenuation: 0.2
+  webrtc_gain: 2.2
+  webrtc_denoise: false
+  webrtc_target_peak: 18000
+  webrtc_noise_gate_rms: 45
+  webrtc_noise_gate_attenuation: 0.6
   noise_calibration_seconds: 1.0
   noise_gate_multiplier: 2.5
   noise_gate_min_rms: 120
@@ -136,10 +136,10 @@ vad:
   aggressiveness: 2
   debug: true
   debug_interval: 1.0
-  silence_rms: 300
-  silence_multiplier: 2.5
-  command_silence_rms: 360
-  command_silence_multiplier: 1.15
+  silence_rms: 180
+  silence_multiplier: 2.0
+  command_silence_rms: 160
+  command_silence_multiplier: 1.05
   silence_timeout_ms: 1200
   command_silence_timeout_ms: 360
   min_speech_ms: 240
