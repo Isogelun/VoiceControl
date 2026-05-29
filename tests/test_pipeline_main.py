@@ -21,6 +21,13 @@ class InlineWakeCommandTests(unittest.TestCase):
 
 
 class CommandParsingTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self._fast_path_patch = mock.patch.object(pipeline_main, "COMMAND_RULES_FAST_PATH", False)
+        self._fast_path_patch.start()
+
+    async def asyncTearDown(self):
+        self._fast_path_patch.stop()
+
     async def test_enter_listening_plays_wake_audio_through_dispatcher(self):
         pipe = VoicePipeline.__new__(VoicePipeline)
         pipe.dispatcher = mock.Mock()
@@ -30,6 +37,7 @@ class CommandParsingTests(unittest.IsolatedAsyncioTestCase):
         with mock.patch.object(pipeline_main, "WAKE_FEEDBACK_ENABLED", True):
             with mock.patch.object(pipeline_main, "WAKE_AUDIO", "audio/wake.mp3"):
                 with mock.patch.object(pipeline_main.asyncio, "create_task") as create_task:
+                    create_task.side_effect = lambda coro: coro.close()
                     pipe._enter_listening({"source": "test"})
 
         self.assertEqual(pipe._state, "listening")
@@ -56,6 +64,19 @@ class CommandParsingTests(unittest.IsolatedAsyncioTestCase):
         pipe.dispatcher.dispatch.assert_awaited_once()
         dispatched = pipe.dispatcher.dispatch.await_args.args[0]
         self.assertEqual(dispatched["source"], "model")
+
+    async def test_parse_command_fast_path_skips_nlu_for_known_commands(self):
+        pipe = VoicePipeline.__new__(VoicePipeline)
+        rule_result = {"intent": "move_forward", "slots": {"direction": "forward"}, "source": "rule"}
+
+        with mock.patch.object(pipeline_main, "COMMAND_RULES_FAST_PATH", True):
+            with mock.patch.object(pipeline_main, "parse_command_rule", return_value=rule_result) as parse_command_rule:
+                with mock.patch.object(pipeline_main, "call_nlu", mock.AsyncMock()) as call_nlu:
+                    result = await pipe._parse_command_with_nlu("forward")
+
+        parse_command_rule.assert_called_once_with("forward")
+        call_nlu.assert_not_called()
+        self.assertEqual(result, rule_result)
 
     async def test_process_utterance_strips_repeated_wake_prefix_before_nlu(self):
         pipe = VoicePipeline.__new__(VoicePipeline)
@@ -95,6 +116,18 @@ class CommandParsingTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertGreater(pipe._feedback_suppress_until, 0.0)
         self.assertTrue(pipe._is_feedback_suppressed())
+
+    async def test_trim_utterance_removes_leading_and_trailing_silence(self):
+        pipe = VoicePipeline.__new__(VoicePipeline)
+        pipe._noise_rms = 10.0
+        silence = pipeline_main.np.zeros(pipeline_main.VAD_FRAME_SAMPLES * 6, dtype=pipeline_main.np.int16)
+        speech = pipeline_main.np.full(pipeline_main.VAD_FRAME_SAMPLES * 2, 1000, dtype=pipeline_main.np.int16)
+        pcm = pipeline_main.np.concatenate([silence, speech, silence])
+
+        trimmed = pipeline_main.np.frombuffer(pipe._trim_utterance(pcm.tobytes()), dtype=pipeline_main.np.int16)
+
+        self.assertLess(trimmed.size, pcm.size)
+        self.assertGreaterEqual(trimmed.size, speech.size)
 
 
 if __name__ == "__main__":

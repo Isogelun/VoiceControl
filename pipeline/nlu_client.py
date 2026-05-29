@@ -1,37 +1,43 @@
 """
-pipeline/nlu_client.py
-
-NLU HTTP 客户端 — 调用 nlu/server.py 提供的 HTTP 服务。
-
-环境变量:
-    NLU_URL   NLU 服务地址，默认 http://localhost:8001/nlu
+NLU HTTP client.
 """
 
-import os
 import logging
+import os
 
 import aiohttp
 
 log = logging.getLogger(__name__)
 
 NLU_URL = os.environ.get("NLU_URL", "http://localhost:8001/nlu")
+_NLU_SESSION = None
 
 
 async def call_nlu(text: str) -> dict:
-    """调用 NLU HTTP 服务进行意图识别和槽位填充"""
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                NLU_URL,
-                json={"text": text},
-                timeout=aiohttp.ClientTimeout(total=10),
-            ) as resp:
-                if resp.status != 200:
-                    log.error("NLU 服务返回 %d", resp.status)
-                    return {"intent": "unknown", "slots": {}, "raw": text}
-                result = await resp.json()
-                log.info("NLU 结果: intent=%s slots=%s", result.get("intent"), result.get("slots"))
-                return result
-    except Exception as e:
-        log.error("NLU 调用失败: %s", e)
+        session = await _get_nlu_session()
+        async with session.post(NLU_URL, json={"text": text}) as resp:
+            if resp.status != 200:
+                log.error("NLU service returned %d", resp.status)
+                return {"intent": "unknown", "slots": {}, "raw": text}
+            result = await resp.json()
+            log.info("NLU result: intent=%s slots=%s", result.get("intent"), result.get("slots"))
+            return result
+    except Exception as exc:
+        log.error("NLU call failed: %s", exc)
         return {"intent": "unknown", "slots": {}, "raw": text}
+
+
+async def _get_nlu_session():
+    global _NLU_SESSION
+    if _NLU_SESSION is None or _NLU_SESSION.closed:
+        timeout = aiohttp.ClientTimeout(total=10)
+        _NLU_SESSION = aiohttp.ClientSession(timeout=timeout)
+    return _NLU_SESSION
+
+
+async def close_nlu_session():
+    global _NLU_SESSION
+    if _NLU_SESSION is not None and not _NLU_SESSION.closed:
+        await _NLU_SESSION.close()
+    _NLU_SESSION = None

@@ -73,7 +73,8 @@ class Qwen3ASREngine:
     def __init__(self, model_dir: str, num_threads: int = None, use_gpu: bool = False):
         if num_threads is None:
             cores = os.cpu_count() or 4
-            num_threads = min(max(2, cores - 1), 4)
+            max_threads = int(os.environ.get("QWEN_ASR_MAX_THREADS", "8"))
+            num_threads = min(max(2, cores - 1), max_threads)
 
         self.model_dir = model_dir
         self.suffix = _model_suffix(model_dir)
@@ -82,7 +83,8 @@ class Qwen3ASREngine:
         self.providers = _providers(use_gpu)
         self.config = self._load_config()
         self.special = self.config.get("special_tokens", {})
-        self.max_new_tokens = int(os.environ.get("QWEN_ASR_MAX_NEW_TOKENS", "96"))
+        self.max_new_tokens = int(os.environ.get("QWEN_ASR_MAX_NEW_TOKENS", "32"))
+        self.fast_mel = os.environ.get("QWEN_ASR_FAST_MEL", "1") not in {"0", "false", "False", "no"}
 
         self.encoder = _ort_session(os.path.join(model_dir, "encoder" + self.suffix), self.providers, num_threads)
         self.decoder_init = _ort_session(
@@ -93,6 +95,7 @@ class Qwen3ASREngine:
         )
         self.tokenizer = self._load_tokenizer()
         self.embed_tokens = self._load_embeddings()
+        self._init_mel_frontend()
 
         logger.info(
             "Qwen3-ASR model loaded (%s, provider: %s)",
@@ -123,10 +126,63 @@ class Qwen3ASREngine:
             shape=(vocab_size, hidden_size),
         )
 
+    def _init_mel_frontend(self):
+        mel_cfg = self.config.get("mel", {})
+        self._n_fft = int(mel_cfg.get("n_fft", 400))
+        self._hop_length = int(mel_cfg.get("hop_length", 160))
+        self._n_mels = int(mel_cfg.get("n_mels", 128))
+        fmin = float(mel_cfg.get("fmin", 0))
+        fmax = float(mel_cfg.get("fmax", SAMPLE_RATE // 2))
+        n = np.arange(self._n_fft, dtype=np.float32)
+        # Match librosa/scipy's periodic Hann window for window="hann".
+        self._window = (0.5 - 0.5 * np.cos(2.0 * np.pi * n / self._n_fft)).astype(np.float32)
+
+        import librosa
+
+        self._mel_basis = librosa.filters.mel(
+            sr=SAMPLE_RATE,
+            n_fft=self._n_fft,
+            n_mels=self._n_mels,
+            fmin=fmin,
+            fmax=fmax,
+            htk=False,
+            norm="slaney",
+        ).astype(np.float32)
+
     def _token_ids(self, text: str):
         return self.tokenizer.encode(text).ids
 
     def _log_mel(self, wav: np.ndarray) -> np.ndarray:
+        if self.fast_mel:
+            return self._log_mel_fast(wav)
+        return self._log_mel_librosa(wav)
+
+    def _log_mel_fast(self, wav: np.ndarray) -> np.ndarray:
+        wav = np.asarray(wav, dtype=np.float32)
+        if wav.size == 0:
+            wav = np.zeros(SAMPLE_RATE // 10, dtype=np.float32)
+
+        pad = self._n_fft // 2
+        padded = np.pad(wav, (pad, pad), mode="constant")
+        if padded.size < self._n_fft:
+            padded = np.pad(padded, (0, self._n_fft - padded.size), mode="constant")
+
+        n_frames = 1 + (padded.size - self._n_fft) // self._hop_length
+        frames = np.lib.stride_tricks.as_strided(
+            padded,
+            shape=(n_frames, self._n_fft),
+            strides=(padded.strides[0] * self._hop_length, padded.strides[0]),
+            writeable=False,
+        )
+        windowed = frames * self._window
+        power = np.abs(np.fft.rfft(windowed, n=self._n_fft, axis=1)) ** 2
+        mel = np.dot(self._mel_basis, power.T, out=None)
+        log_mel = np.log10(np.maximum(mel, 1e-10))
+        log_mel = np.maximum(log_mel, log_mel.max() - 8.0)
+        log_mel = (log_mel + 4.0) / 4.0
+        return log_mel[None].astype(np.float32, copy=False)
+
+    def _log_mel_librosa(self, wav: np.ndarray) -> np.ndarray:
         import librosa
 
         wav = np.asarray(wav, dtype=np.float32)

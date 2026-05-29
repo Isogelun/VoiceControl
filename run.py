@@ -132,9 +132,12 @@ CONFIG_ENV_MAP = {
     ("vad", "debug"): "VAD_DEBUG",
     ("vad", "debug_interval"): "VAD_DEBUG_INTERVAL",
     ("vad", "silence_timeout_ms"): "VAD_SILENCE_TIMEOUT_MS",
+    ("vad", "command_silence_timeout_ms"): "COMMAND_VAD_SILENCE_TIMEOUT_MS",
     ("vad", "min_speech_ms"): "VAD_MIN_SPEECH_MS",
     ("vad", "command_listen_timeout_ms"): "COMMAND_LISTEN_TIMEOUT_MS",
     ("vad", "utterance_pad_ms"): "UTTERANCE_PAD_MS",
+    ("vad", "utterance_trim_enabled"): "UTTERANCE_TRIM_ENABLED",
+    ("vad", "utterance_trim_pad_ms"): "UTTERANCE_TRIM_PAD_MS",
 }
 CONFIG_PATH_ENV_NAMES = {
     "KWS_MODEL_DIR",

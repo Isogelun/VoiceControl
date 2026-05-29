@@ -2,8 +2,8 @@
 ASR HTTP client.
 
 The pipeline sends raw 16 kHz mono int16 PCM to the local ASR service as a WAV
-upload. Qwen3-ASR can be much slower than the old ASR model on CPU, so the
-timeout is intentionally configurable and higher than before.
+upload. The client keeps one aiohttp session per process to avoid rebuilding
+connections for every utterance.
 """
 
 import io
@@ -21,6 +21,7 @@ ASR_TIMEOUT = float(os.environ.get("ASR_TIMEOUT", "90"))
 PCM_SAMPLE_RATE = 16000
 PCM_CHANNELS = 1
 PCM_SAMPLE_WIDTH = 2
+_ASR_SESSION = None
 
 
 def _pcm_to_wav(
@@ -66,29 +67,28 @@ async def call_asr(pcm_bytes: bytes) -> str:
         form.add_field("language", "zh")
         form.add_field("use_itn", "true")
 
-        timeout = aiohttp.ClientTimeout(total=ASR_TIMEOUT)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(ASR_URL, data=form) as resp:
-                if resp.status != 200:
-                    body = await resp.text()
-                    log.error("ASR 服务返回 %d: %s", resp.status, body[:300])
-                    return ""
+        session = await _get_asr_session()
+        async with session.post(ASR_URL, data=form) as resp:
+            if resp.status != 200:
+                body = await resp.text()
+                log.error("ASR service returned %d: %s", resp.status, body[:300])
+                return ""
 
-                result = await resp.json()
-                text = result.get("text", "")
-                elapsed_ms = (time.perf_counter() - started) * 1000
-                log.info(
-                    "ASR 结果: %s (服务耗时 %sms, HTTP %.1fms, 音频 %.0fms)",
-                    text,
-                    result.get("total_ms", "?"),
-                    elapsed_ms,
-                    audio_ms,
-                )
-                return text
+            result = await resp.json()
+            text = result.get("text", "")
+            elapsed_ms = (time.perf_counter() - started) * 1000
+            log.info(
+                "ASR result: %s (service %sms, HTTP %.1fms, audio %.0fms)",
+                text,
+                result.get("total_ms", "?"),
+                elapsed_ms,
+                audio_ms,
+            )
+            return text
     except Exception as exc:
         elapsed_ms = (time.perf_counter() - started) * 1000
         log.error(
-            "ASR 调用失败: %s: %s (HTTP %.1fms, timeout %.1fs, 音频 %.0fms)",
+            "ASR call failed: %s: %s (HTTP %.1fms, timeout %.1fs, audio %.0fms)",
             type(exc).__name__,
             exc,
             elapsed_ms,
@@ -96,3 +96,18 @@ async def call_asr(pcm_bytes: bytes) -> str:
             audio_ms,
         )
         return ""
+
+
+async def _get_asr_session():
+    global _ASR_SESSION
+    if _ASR_SESSION is None or _ASR_SESSION.closed:
+        timeout = aiohttp.ClientTimeout(total=ASR_TIMEOUT)
+        _ASR_SESSION = aiohttp.ClientSession(timeout=timeout)
+    return _ASR_SESSION
+
+
+async def close_asr_session():
+    global _ASR_SESSION
+    if _ASR_SESSION is not None and not _ASR_SESSION.closed:
+        await _ASR_SESSION.close()
+    _ASR_SESSION = None

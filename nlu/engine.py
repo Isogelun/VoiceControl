@@ -20,6 +20,13 @@ PREFIX = "指令解析: "
 DEFAULT_MAX_INPUT = 64
 DEFAULT_MAX_OUTPUT = 128
 SESSION_EXPORT_CONFIGS: Dict[int, dict] = {}
+STRUCTURED_STOP_CHARS = {"}", "]"}
+STRUCTURED_EARLY_STOP = os.environ.get("NLU_STRUCTURED_EARLY_STOP", "0") not in {
+    "0",
+    "false",
+    "False",
+    "no",
+}
 
 
 def _load_export_config(model_dir: str) -> dict:
@@ -37,7 +44,8 @@ def load_sessions(model_dir: str, use_gpu: bool = False, num_threads: int = None
     """Load encoder/decoder ONNX sessions."""
     if num_threads is None:
         cores = os.cpu_count() or 4
-        num_threads = min(max(2, cores - 1), 4)
+        max_threads = int(os.environ.get("NLU_MAX_THREADS", "4"))
+        num_threads = min(max(2, cores - 1), max_threads)
 
     opts = ort.SessionOptions()
     opts.intra_op_num_threads = num_threads
@@ -98,6 +106,7 @@ def predict(enc_sess, dec_sess, tokenizer, text: str) -> str:
 
     dec_ids = np.array([[decoder_start_token_id]], dtype=np.int64)
     enc_mask = inputs["attention_mask"].astype(np.int64)
+    generated_ids = []
 
     for _ in range(max_output):
         logits = dec_sess.run(
@@ -111,9 +120,21 @@ def predict(enc_sess, dec_sess, tokenizer, text: str) -> str:
         next_id = int(np.argmax(logits[0, -1]))
         if next_id == eos_token_id:
             break
+        generated_ids.append(next_id)
         dec_ids = np.concatenate([dec_ids, [[next_id]]], axis=1)
+        if STRUCTURED_EARLY_STOP and _should_stop_structured_decode(tokenizer, generated_ids):
+            break
 
     return tokenizer.decode(dec_ids[0], skip_special_tokens=True)
+
+
+def _should_stop_structured_decode(tokenizer, token_ids) -> bool:
+    if not token_ids:
+        return False
+    text = tokenizer.decode(token_ids, skip_special_tokens=True).strip()
+    if not text or text[-1] not in STRUCTURED_STOP_CHARS:
+        return False
+    return _loads_json(text) is not None
 
 
 def parse_nlu_output(raw_output: str) -> dict:
@@ -210,6 +231,7 @@ def _command_type_to_intent(command_type: str, payload_json: Optional[dict] = No
         "greet": "greet",
         "shakebody": "shake_body",
         "stretch": "stretch",
+        "damp": "stop",
         "stop": "stop",
         "stopmove": "stop",
         "error": "unknown",

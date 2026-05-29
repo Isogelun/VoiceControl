@@ -140,10 +140,13 @@ vad:
   silence_multiplier: 2.5
   command_silence_rms: 360
   command_silence_multiplier: 1.15
-  silence_timeout_ms: 1800
+  silence_timeout_ms: 1200
+  command_silence_timeout_ms: 360
   min_speech_ms: 240
   command_listen_timeout_ms: 8000
-  utterance_pad_ms: 240
+  utterance_pad_ms: 80
+  utterance_trim_enabled: true
+  utterance_trim_pad_ms: 90
 
 command:
   output_dir: output

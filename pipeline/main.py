@@ -62,6 +62,7 @@ WAKE_AUDIO = os.environ.get("WAKE_AUDIO", os.path.join(_PROJECT_ROOT, "audio", "
 
 WAKE_FEEDBACK_ENABLED = os.environ.get("WAKE_FEEDBACK_ENABLED", "0") not in {"0", "false", "False", "no", ""}
 COMMAND_RULES_ENABLED = os.environ.get("COMMAND_RULES_ENABLED", "0") not in {"0", "false", "False", "no", ""}
+COMMAND_RULES_FAST_PATH = os.environ.get("COMMAND_RULES_FAST_PATH", "1") not in {"0", "false", "False", "no", ""}
 COMMAND_FEEDBACK_SUPPRESS_MS = int(os.environ.get("COMMAND_FEEDBACK_SUPPRESS_MS", "1800"))
 
 VAD_SAMPLE_RATE = 16000
@@ -76,10 +77,14 @@ COMMAND_VAD_SILENCE_MULTIPLIER = float(os.environ.get("COMMAND_VAD_SILENCE_MULTI
 VAD_DEBUG = os.environ.get("VAD_DEBUG", "0") not in {"0", "false", "False", "no", ""}
 VAD_DEBUG_INTERVAL = float(os.environ.get("VAD_DEBUG_INTERVAL", "1.0"))
 SILENCE_TIMEOUT_MS = int(os.environ.get("VAD_SILENCE_TIMEOUT_MS", "1200"))
+COMMAND_SILENCE_TIMEOUT_MS = int(os.environ.get("COMMAND_VAD_SILENCE_TIMEOUT_MS", "360"))
 MIN_SPEECH_MS = int(os.environ.get("VAD_MIN_SPEECH_MS", "240"))
 COMMAND_LISTEN_TIMEOUT_MS = int(os.environ.get("COMMAND_LISTEN_TIMEOUT_MS", "8000"))
-UTTERANCE_PAD_MS = int(os.environ.get("UTTERANCE_PAD_MS", "240"))
+UTTERANCE_PAD_MS = int(os.environ.get("UTTERANCE_PAD_MS", "80"))
+UTTERANCE_TRIM_ENABLED = os.environ.get("UTTERANCE_TRIM_ENABLED", "1") not in {"0", "false", "False", "no", ""}
+UTTERANCE_TRIM_PAD_MS = int(os.environ.get("UTTERANCE_TRIM_PAD_MS", "90"))
 SILENCE_TIMEOUT_FRAMES = max(1, SILENCE_TIMEOUT_MS // VAD_FRAME_MS)
+COMMAND_SILENCE_TIMEOUT_FRAMES = max(1, COMMAND_SILENCE_TIMEOUT_MS // VAD_FRAME_MS)
 MIN_SPEECH_FRAMES = max(1, MIN_SPEECH_MS // VAD_FRAME_MS)
 COMMAND_LISTEN_TIMEOUT_FRAMES = max(1, COMMAND_LISTEN_TIMEOUT_MS // VAD_FRAME_MS)
 UTTERANCE_PAD_SAMPLES = VAD_SAMPLE_RATE * UTTERANCE_PAD_MS // 1000
@@ -296,11 +301,12 @@ class VoicePipeline:
         self._reset_speech_capture()
         log.info("Wake feedback enabled: %s", WAKE_FEEDBACK_ENABLED)
         log.info(
-            "VAD 裁切: mode=%s silence_rms=%.1f multiplier=%.2f silence_timeout=%sms min_speech=%sms",
+            "VAD 裁切: mode=%s silence_rms=%.1f multiplier=%.2f wake_timeout=%sms command_timeout=%sms min_speech=%sms",
             self.vad_mode,
             VAD_SILENCE_RMS,
             VAD_SILENCE_MULTIPLIER,
             SILENCE_TIMEOUT_MS,
+            COMMAND_SILENCE_TIMEOUT_MS,
             MIN_SPEECH_MS,
         )
 
@@ -404,12 +410,12 @@ class VoicePipeline:
                 self._reset_speech_capture()
                 break
 
-            if self._silence_count >= SILENCE_TIMEOUT_FRAMES:
+            if self._silence_count >= COMMAND_SILENCE_TIMEOUT_FRAMES:
                 if self._speech_frame_count >= MIN_SPEECH_FRAMES:
                     log.info(
                         "Command speech ended: speech=%sms silence=%sms, running ASR/NLU",
                         self._speech_frame_count * VAD_FRAME_MS,
-                        SILENCE_TIMEOUT_MS,
+                        COMMAND_SILENCE_TIMEOUT_MS,
                     )
                     await self._process_utterance(self._with_padding(self._speech_buf))
                 else:
@@ -494,6 +500,12 @@ class VoicePipeline:
         self._suppress_feedback_audio()
 
     async def _parse_command_with_nlu(self, text: str) -> dict:
+        if COMMAND_RULES_FAST_PATH:
+            fallback = parse_command_rule(text)
+            if fallback:
+                log.info("Rule fast-path matched before NLU: %s", json.dumps(fallback, ensure_ascii=False))
+                return fallback
+
         try:
             result = await call_nlu(text)
             log.info("NLU model result: %s", json.dumps(result, ensure_ascii=False))
@@ -559,10 +571,11 @@ class VoicePipeline:
 
     def _with_external_metadata(self, metadata: dict) -> dict:
         out = dict(metadata or {})
-        if not self.metadata_provider:
+        metadata_provider = getattr(self, "metadata_provider", None)
+        if not metadata_provider:
             return out
         try:
-            extra = self.metadata_provider() or {}
+            extra = metadata_provider() or {}
         except Exception:
             log.exception("Failed to read external voice metadata")
             return out
@@ -588,9 +601,34 @@ class VoicePipeline:
         self._listen_frame_count = 0
 
     def _with_padding(self, pcm_bytes: bytes) -> bytes:
+        pcm_bytes = self._trim_utterance(pcm_bytes)
         if not UTTERANCE_PAD_BYTES:
             return pcm_bytes
         return UTTERANCE_PAD_BYTES + pcm_bytes + UTTERANCE_PAD_BYTES
+
+    def _trim_utterance(self, pcm_bytes: bytes) -> bytes:
+        if not UTTERANCE_TRIM_ENABLED or not pcm_bytes:
+            return pcm_bytes
+        pcm = np.frombuffer(pcm_bytes, dtype=np.int16)
+        if pcm.size < VAD_FRAME_SAMPLES:
+            return pcm_bytes
+
+        frames = pcm.size // VAD_FRAME_SAMPLES
+        trimmed = pcm[:frames * VAD_FRAME_SAMPLES].reshape(frames, VAD_FRAME_SAMPLES)
+        rms = np.sqrt(np.mean(trimmed.astype(np.float32) ** 2, axis=1))
+        threshold = max(COMMAND_VAD_SILENCE_RMS * 0.6, self._noise_rms * COMMAND_VAD_SILENCE_MULTIPLIER)
+        speech = np.flatnonzero(rms >= threshold)
+        if speech.size == 0:
+            return pcm_bytes
+
+        pad_frames = max(1, UTTERANCE_TRIM_PAD_MS // VAD_FRAME_MS)
+        start_frame = max(0, int(speech[0]) - pad_frames)
+        end_frame = min(frames, int(speech[-1]) + pad_frames + 1)
+        start = start_frame * VAD_FRAME_SAMPLES
+        end = end_frame * VAD_FRAME_SAMPLES
+        if start == 0 and end >= pcm.size:
+            return pcm_bytes
+        return pcm[start:end].astype(np.int16, copy=False).tobytes()
 
     def _is_speech(self, chunk: np.ndarray, chunk_bytes: bytes) -> bool:
         if self.vad_mode == "webrtc":
@@ -677,7 +715,19 @@ class VoicePipeline:
         stats["last_log"] = now
 
     def close(self):
-        pass
+        try:
+            from .asr_client import close_asr_session
+            from .nlu_client import close_nlu_session
+        except Exception:
+            log.debug("Failed to import pipeline client closers", exc_info=True)
+            return
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        loop.create_task(close_asr_session())
+        loop.create_task(close_nlu_session())
 
 
 def _dbfs(rms: float) -> float:

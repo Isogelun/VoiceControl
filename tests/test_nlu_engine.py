@@ -61,6 +61,14 @@ class ParseNluOutputTests(unittest.TestCase):
         self.assertEqual(result["source"], "chat")
         self.assertEqual(result["message"], "hello")
 
+    def test_damp_command_maps_to_stop(self):
+        raw = json.dumps({"type": "cmd", "payload": {"command_type": "Damp", "payload_json": {}}})
+
+        result = parse_nlu_output(raw)
+
+        self.assertEqual(result["intent"], "stop")
+        self.assertEqual(result["slots"]["command_type"], "Damp")
+
 
 if __name__ == "__main__":
     unittest.main()
