@@ -137,7 +137,14 @@ python run.py --pipeline-only          # 仅 Pipeline（服务已在其他地方
 | `WAKE_TEXT` | `你好花花,你好，花花,花花` | ASR 唤醒匹配文本 |
 | `WAKE_AUDIO` | `audio/xuanxinghuida.mp3` | 唤醒确认音频 |
 | `ASR_URL` | `http://localhost:8000/asr` | ASR 服务地址 |
+| `ASR_RETRIES` | `1` | ASR 调用失败时的额外重试次数（总尝试 = 该值 + 1） |
+| `ASR_RETRY_DELAY_MS` | `200` | ASR 重试之间的等待时长 |
 | `NLU_URL` | `http://localhost:8001/nlu` | NLU 服务地址 |
+| `NLU_TIMEOUT` | `10` | NLU 调用超时（秒） |
+| `NLU_RETRIES` | `1` | NLU 调用失败时的额外重试次数（总尝试 = 该值 + 1） |
+| `NLU_RETRY_DELAY_MS` | `150` | NLU 重试之间的等待时长 |
+| `COMMAND_RULES_ENABLED` | `1` | NLU 不可用或返回 unknown 时，是否用规则库兜底高频命令 |
+| `COMMAND_RULES_FAST_PATH` | `1` | 高频命令先走规则快路径，命中则跳过 NLU |
 | `COMMAND_OUTPUT_DIR` | `output` | 指令 JSON 输出目录 |
 | `COMMAND_SERVICE_URL` | 空 | 后续动作/机器人服务地址，配置后会 POST 指令 JSON |
 | `COMMAND_SUCCESS_AUDIO` | `audio/xuanxinghuida.mp3` | 指令接收/完成反馈音频 |
@@ -163,7 +170,7 @@ python run.py --pipeline-only          # 仅 Pipeline（服务已在其他地方
 
 - 唤醒词宽松匹配：文本匹配 + 简易拼音匹配，处理“墨/莫/默”等同音字。
 - ASR 文本归一化：在进入 NLU 前修正“网前走”“左传”等常见误识别。
-- 命令规则兜底：高频动作命令先匹配有限规则，未命中再调用 NLU。
+- 命令规则兜底：高频动作命令先匹配有限规则（快路径），未命中再调用 NLU；当 NLU 服务不可用或返回 unknown 时，同样回落到规则库，避免整句指令被直接丢弃。
 
 ## 性能
 

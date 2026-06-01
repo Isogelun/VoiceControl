@@ -210,13 +210,17 @@ class CommandDispatcher:
         }
 
     def _persist(self, envelope: dict):
-        output_dir = Path(COMMAND_OUTPUT_DIR)
-        output_dir.mkdir(parents=True, exist_ok=True)
-        latest = output_dir / "latest_command.json"
-        history = output_dir / f"{envelope['created_at'].replace(':', '-')}_{envelope['id']}.json"
-        data = json.dumps(envelope, ensure_ascii=False, indent=2)
-        latest.write_text(data, encoding="utf-8")
-        history.write_text(data, encoding="utf-8")
+        # 落盘失败（磁盘满/权限/路径非法）不应中断指令分发主流程。
+        try:
+            output_dir = Path(COMMAND_OUTPUT_DIR)
+            output_dir.mkdir(parents=True, exist_ok=True)
+            latest = output_dir / "latest_command.json"
+            history = output_dir / f"{envelope['created_at'].replace(':', '-')}_{envelope['id']}.json"
+            data = json.dumps(envelope, ensure_ascii=False, indent=2)
+            latest.write_text(data, encoding="utf-8")
+            history.write_text(data, encoding="utf-8")
+        except Exception:
+            log.exception("指令落盘失败: id=%s", envelope.get("id") if isinstance(envelope, dict) else "?")
 
     def _is_actionable(self, command: dict) -> bool:
         if not isinstance(command, dict):

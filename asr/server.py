@@ -29,11 +29,15 @@ def run_serve(engine, host="0.0.0.0", port=8000):
         language: str = Form("auto"),
         use_itn: bool = Form(True),
     ):
-        data = await audio.read()
-        wav = load_audio(io.BytesIO(data))
-        result = transcribe(engine, wav, language, use_itn)
-        logger.info("total=%sms | %s", result["total_ms"], result["text"][:60])
-        return JSONResponse(content=result)
+        try:
+            data = await audio.read()
+            wav = load_audio(io.BytesIO(data))
+            result = transcribe(engine, wav, language, use_itn)
+            logger.info("total=%sms | %s", result["total_ms"], result["text"][:60])
+            return JSONResponse(content=result)
+        except Exception as exc:
+            logger.exception("ASR inference failed")
+            return JSONResponse(status_code=500, content={"text": "", "error": str(exc)})
 
     @app.get("/health")
     async def health():

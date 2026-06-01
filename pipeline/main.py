@@ -61,7 +61,8 @@ WAKE_ALIASES = os.environ.get(
 WAKE_AUDIO = os.environ.get("WAKE_AUDIO", os.path.join(_PROJECT_ROOT, "audio", "xuanxinghuida.mp3"))
 
 WAKE_FEEDBACK_ENABLED = os.environ.get("WAKE_FEEDBACK_ENABLED", "0") not in {"0", "false", "False", "no", ""}
-COMMAND_RULES_ENABLED = os.environ.get("COMMAND_RULES_ENABLED", "0") not in {"0", "false", "False", "no", ""}
+# 默认开启：NLU 不可用或返回 unknown 时，用规则库兜底高频命令，避免整句指令直接被丢弃。
+COMMAND_RULES_ENABLED = os.environ.get("COMMAND_RULES_ENABLED", "1") not in {"0", "false", "False", "no", ""}
 COMMAND_RULES_FAST_PATH = os.environ.get("COMMAND_RULES_FAST_PATH", "1") not in {"0", "false", "False", "no", ""}
 COMMAND_FEEDBACK_SUPPRESS_MS = int(os.environ.get("COMMAND_FEEDBACK_SUPPRESS_MS", "1800"))
 
@@ -498,16 +499,29 @@ class VoicePipeline:
             )
             log.info("指令分发结果: %s", json.dumps(dispatch_result, ensure_ascii=False))
             self._suppress_feedback_audio()
+        except Exception:
+            log.exception("处理语音指令失败，播放失败反馈")
+            await self._safe_play_unavailable()
         finally:
             self._wake_metadata = {}
 
     async def _process_command_text(self, command_text: str, asr_text: str, normalized_text: str):
-        wake_metadata = self._with_external_metadata(dict(self._wake_metadata))
-        result = await self._parse_command_with_nlu(command_text)
-        log.info("Command JSON: %s", json.dumps(result, ensure_ascii=False))
-        dispatch_result = await self.dispatcher.dispatch(result, asr_text, normalized_text, wake_metadata)
-        log.info("Command dispatch result: %s", json.dumps(dispatch_result, ensure_ascii=False))
-        self._suppress_feedback_audio()
+        try:
+            wake_metadata = self._with_external_metadata(dict(self._wake_metadata))
+            result = await self._parse_command_with_nlu(command_text)
+            log.info("Command JSON: %s", json.dumps(result, ensure_ascii=False))
+            dispatch_result = await self.dispatcher.dispatch(result, asr_text, normalized_text, wake_metadata)
+            log.info("Command dispatch result: %s", json.dumps(dispatch_result, ensure_ascii=False))
+            self._suppress_feedback_audio()
+        except Exception:
+            log.exception("处理内联命令失败，播放失败反馈")
+            await self._safe_play_unavailable()
+
+    async def _safe_play_unavailable(self):
+        try:
+            await self.dispatcher.play_unavailable()
+        except Exception:
+            log.exception("失败反馈音频播放异常")
 
     async def _parse_command_with_nlu(self, text: str) -> dict:
         if COMMAND_RULES_FAST_PATH:
@@ -516,28 +530,33 @@ class VoicePipeline:
                 log.info("Rule fast-path matched before NLU: %s", json.dumps(fallback, ensure_ascii=False))
                 return fallback
 
+        result = None
+        nlu_error = None
         try:
             result = await call_nlu(text)
             log.info("NLU model result: %s", json.dumps(result, ensure_ascii=False))
         except Exception as exc:
-            log.exception("NLU failed, using fallback for text: %s", text)
-            fallback = parse_command_rule(text)
-            if fallback:
-                log.info("Rule fallback matched after NLU failure: %s", json.dumps(fallback, ensure_ascii=False))
-                return fallback
-            return {
-                "intent": "unknown",
-                "slots": {},
-                "source": "nlu_error",
-                "error": str(exc),
-                "raw": text,
-            }
-        if COMMAND_RULES_ENABLED and (not result or result.get("intent") == "unknown"):
+            nlu_error = exc
+            log.exception("NLU failed for text: %s", text)
+
+        # 规则兜底：NLU 调用异常、返回空、或识别为 unknown 时都尝试规则匹配。
+        # call_nlu 自身会把网络/服务异常吞成 unknown，所以这里不能只依赖上面的 except 分支。
+        if COMMAND_RULES_ENABLED and (not result or result.get("intent") in (None, "unknown")):
             fallback = parse_command_rule(text)
             if fallback:
                 log.info("Rule fallback matched: %s", json.dumps(fallback, ensure_ascii=False))
                 return fallback
-        return result
+
+        if result:
+            return result
+
+        return {
+            "intent": "unknown",
+            "slots": {},
+            "source": "nlu_error",
+            "error": str(nlu_error) if nlu_error else "nlu_unavailable",
+            "raw": text,
+        }
 
     def _strip_wake_phrase(self, text: str) -> str:
         normalized = normalize_asr_text(text)

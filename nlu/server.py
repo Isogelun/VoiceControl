@@ -34,10 +34,17 @@ def run_serve(enc_sess, dec_sess, tokenizer, host="0.0.0.0", port=8001):
 
     @app.post("/nlu")
     async def nlu_endpoint(req: NLURequest):
-        raw_output = predict(enc_sess, dec_sess, tokenizer, req.text)
-        result = parse_nlu_output(raw_output)
-        logger.info(f"NLU: '{req.text}' -> {result}")
-        return JSONResponse(content=result)
+        try:
+            raw_output = predict(enc_sess, dec_sess, tokenizer, req.text)
+            result = parse_nlu_output(raw_output)
+            logger.info(f"NLU: '{req.text}' -> {result}")
+            return JSONResponse(content=result)
+        except Exception as exc:
+            logger.exception("NLU inference failed")
+            return JSONResponse(
+                status_code=500,
+                content={"intent": "unknown", "slots": {}, "raw": req.text, "error": str(exc)},
+            )
 
     @app.get("/health")
     async def health():
