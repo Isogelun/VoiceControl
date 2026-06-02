@@ -28,16 +28,16 @@ MOVE_STEP_TIMEOUT_MS = int(os.environ.get("MOVE_STEP_TIMEOUT_MS", "1200"))
 MOVE_DEFAULT_TIMEOUT_MS = int(os.environ.get("MOVE_DEFAULT_TIMEOUT_MS", "1200"))
 AUTO_STAND_BEFORE_MOVE = os.environ.get("AUTO_STAND_BEFORE_MOVE", "1") not in {"0", "false", "False", "no", ""}
 MOVE_PREPARE_DELAY_MS = int(os.environ.get("MOVE_PREPARE_DELAY_MS", "1200"))
-MOVE_REPEAT_COUNT = max(1, int(os.environ.get("MOVE_REPEAT_COUNT", "5")))
-MOVE_REPEAT_INTERVAL_MS = max(0, int(os.environ.get("MOVE_REPEAT_INTERVAL_MS", "150")))
 MOVE_LINEAR_SPEED = float(os.environ.get("MOVE_LINEAR_SPEED", "0.2"))
 MOVE_YAW_SPEED = float(os.environ.get("MOVE_YAW_SPEED", "0.5"))
-MOVE_CONTINUOUS = os.environ.get("MOVE_CONTINUOUS", "1") not in {"0", "false", "False", "no", ""}
-MOVE_CONTINUOUS_FIELDS = [
-    field.strip()
-    for field in os.environ.get("MOVE_CONTINUOUS_FIELDS", "continous_move,continuous_move").split(",")
-    if field.strip()
-]
+MOVE_PRIME_TIMEOUT_MS = int(os.environ.get("MOVE_PRIME_TIMEOUT_MS", "0"))
+MOVE_POST_MOVE_DELAY_MS = int(os.environ.get("MOVE_POST_MOVE_DELAY_MS", "0"))
+MOVE_NATIVE_ENABLED = os.environ.get("MOVE_NATIVE_ENABLED", "1") not in {"0", "false", "False", "no", ""}
+MOVE_NATIVE_DEFAULT_STEPS = max(1, int(os.environ.get("MOVE_NATIVE_DEFAULT_STEPS", "3")))
+MOVE_NATIVE_MIN_STEPS = max(1, int(os.environ.get("MOVE_NATIVE_MIN_STEPS", "1")))
+MOVE_NATIVE_TIMEOUT_MS = max(1, int(os.environ.get("MOVE_NATIVE_TIMEOUT_MS", "1000")))
+MOVE_NATIVE_LINEAR_SPEED = float(os.environ.get("MOVE_NATIVE_LINEAR_SPEED", "1"))
+MOVE_NATIVE_YAW_SPEED = float(os.environ.get("MOVE_NATIVE_YAW_SPEED", "1"))
 MOVE_STOP_AFTER_TIMEOUT = os.environ.get("MOVE_STOP_AFTER_TIMEOUT", "1") not in {"0", "false", "False", "no", ""}
 COMMAND_SUCCESS_AUDIO = os.environ.get(
     "COMMAND_SUCCESS_AUDIO",
@@ -106,6 +106,8 @@ MOVE_COMMAND_TYPES = {
     "turn_left",
     "turn_right",
 }
+DIRECTIONAL_MOVE_TYPES = MOVE_COMMAND_TYPES - {"move"}
+NATIVE_MOVE_PAYLOAD_KEY = "_native_move_payload"
 ACTION_AUDIO_MAP = {}
 
 
@@ -257,10 +259,15 @@ class CommandDispatcher:
         return await self._post_payload(payload)
 
     async def _post_move_sequence(self, payload: dict) -> dict:
+        """按 test.py 的动作顺序发送：stand_up -> move -> 可选原生方向动作。"""
+        native_payload = payload.get(NATIVE_MOVE_PAYLOAD_KEY) if isinstance(payload, dict) else None
+        move_payload = self._public_payload(payload)
+        timeout_ms = self._move_timeout_ms(move_payload)
         sequence = []
+
+        # 1. 先站立
         if AUTO_STAND_BEFORE_MOVE:
-            prepare_payload = self._inherit_voice_metadata({"command_type": "stand_up"}, payload)
-            prepare_result = await self._post_payload(prepare_payload)
+            prepare_result = await self._post_payload({"command_type": "stand_up", "params": {}})
             sequence.append(prepare_result)
             if not self._service_ok(prepare_result):
                 return {
@@ -270,24 +277,38 @@ class CommandDispatcher:
                     "json": prepare_result.get("json"),
                     "body": prepare_result.get("body", ""),
                 }
-
             if MOVE_PREPARE_DELAY_MS > 0:
                 await asyncio.sleep(MOVE_PREPARE_DELAY_MS / 1000.0)
 
-        repeat_count = self._move_repeat_count(payload)
-        move_result = {}
-        for index in range(repeat_count):
-            log.info("Move repeat %s/%s", index + 1, repeat_count)
-            move_result = await self._post_payload(payload)
-            sequence.append(dict(move_result))
-            if not self._service_ok(move_result):
-                move_result["sequence"] = sequence
-                return move_result
-            if index < repeat_count - 1 and MOVE_REPEAT_INTERVAL_MS > 0:
-                await asyncio.sleep(MOVE_REPEAT_INTERVAL_MS / 1000.0)
+        # 2. 发一次 move 命令（服务端自己按 timeout_ms 控制时长）
+        log.info("Posting move command (once, timeout=%sms): %s", timeout_ms,
+                 json.dumps(move_payload, ensure_ascii=False))
+        move_result = await self._post_payload(move_payload)
+        sequence.append(dict(move_result))
+        if not self._service_ok(move_result):
+            move_result["sequence"] = sequence
+            return move_result
 
+        # 3. 等待 move 完成；如果有方向动作，继续补发原生 move_forward/move_backward 等命令。
+        post_move_delay_ms = timeout_ms
+        if isinstance(native_payload, dict) and native_payload and MOVE_POST_MOVE_DELAY_MS > 0:
+            post_move_delay_ms = MOVE_POST_MOVE_DELAY_MS
+        await asyncio.sleep(post_move_delay_ms / 1000.0)
+        if isinstance(native_payload, dict) and native_payload:
+            native_result = await self._post_payload(native_payload)
+            sequence.append(dict(native_result))
+            if not self._service_ok(native_result):
+                native_result["sequence"] = sequence
+                return native_result
+            native_timeout_ms = self._move_timeout_ms(native_payload)
+            if native_timeout_ms > 0:
+                await asyncio.sleep(native_timeout_ms / 1000.0)
+            native_result["sequence"] = sequence
+            return native_result
+
+        # 4. 停
         if MOVE_STOP_AFTER_TIMEOUT:
-            stop_result = await self._post_payload(self._inherit_voice_metadata({"command_type": "stop"}, payload))
+            stop_result = await self._post_payload({"command_type": "stop", "params": {}})
             sequence.append(dict(stop_result))
             if not self._service_ok(stop_result):
                 stop_result["sequence"] = sequence
@@ -296,14 +317,19 @@ class CommandDispatcher:
         move_result["sequence"] = sequence
         return move_result
 
-    def _move_repeat_count(self, payload: dict) -> int:
+    def _public_payload(self, payload: dict) -> dict:
+        return {
+            key: value
+            for key, value in (payload or {}).items()
+            if not str(key).startswith("_")
+        }
+
+    def _move_timeout_ms(self, payload: dict) -> int:
         try:
-            timeout_ms = int(payload.get("timeout_ms") or MOVE_DEFAULT_TIMEOUT_MS)
+            params = payload.get("params") if isinstance(payload.get("params"), dict) else {}
+            return int(params.get("timeout_ms") or payload.get("timeout_ms") or MOVE_DEFAULT_TIMEOUT_MS)
         except (TypeError, ValueError):
-            timeout_ms = MOVE_DEFAULT_TIMEOUT_MS
-        if timeout_ms <= 0 or MOVE_REPEAT_INTERVAL_MS <= 0:
-            return MOVE_REPEAT_COUNT
-        return max(MOVE_REPEAT_COUNT, (timeout_ms + MOVE_REPEAT_INTERVAL_MS - 1) // MOVE_REPEAT_INTERVAL_MS)
+            return MOVE_DEFAULT_TIMEOUT_MS
 
     async def _post_payload(self, payload: dict) -> dict:
         timeout = aiohttp.ClientTimeout(total=COMMAND_SERVICE_TIMEOUT)
@@ -328,28 +354,32 @@ class CommandDispatcher:
             return {}
 
         command_type = self._extract_motion_command_type(command)
-        payload = {"command_type": command_type}
+        if command_type in MOVE_COMMAND_TYPES:
+            return self._build_move_payload(command, envelope)
+        return {"command_type": command_type, "params": {}}
 
+    def _build_move_payload(self, command: dict, envelope: dict) -> dict:
+        original_command_type = self._extract_motion_command_type(command)
+        slots = command.get("slots") if isinstance(command.get("slots"), dict) else {}
+
+        # 确定速度向量
+        vx, vy, wz = 0.0, 0.0, 0.0
         payload_json = self._extract_payload_json(command)
         if payload_json:
-            payload.update(payload_json)
-        payload.update(_service_voice_metadata(envelope))
-        if command_type in MOVE_COMMAND_TYPES:
-            payload = self._normalize_move_payload(payload, command, envelope)
-        return payload
+            vx = float(payload_json.get("vx", 0) or 0)
+            vy = float(payload_json.get("vy", 0) or 0)
+            if "vyaw" in payload_json:
+                wz = float(payload_json.get("vyaw", 0) or 0)
+            elif "wz" in payload_json:
+                wz = float(payload_json.get("wz", 0) or 0)
 
-    def _normalize_move_payload(self, payload: dict, command: dict, envelope: dict) -> dict:
-        out = dict(payload)
-        original_command_type = str(out.get("command_type") or "")
-        out["command_type"] = "move"
-        if "vyaw" in out and "wz" not in out:
-            out["wz"] = out.pop("vyaw")
-        out.setdefault("vx", 0)
-        out.setdefault("vy", 0)
-        out.setdefault("wz", 0)
+        # 如果模型没给速度，用默认值填充
+        if abs(vx) < 1e-6 and abs(vy) < 1e-6 and abs(wz) < 1e-6:
+            direction = str(slots.get("direction") or "").lower()
+            intent = command.get("intent", "")
+            vx, vy, wz = self._resolve_default_velocity(original_command_type, intent, direction)
 
-        slots = command.get("slots") if isinstance(command.get("slots"), dict) else {}
-        self._apply_default_move_velocity(out, original_command_type, command.get("intent"), slots.get("direction"))
+        # 计算持续时长
         steps = slots.get("steps")
         if steps is None:
             steps = _extract_steps_from_text(
@@ -363,53 +393,74 @@ class CommandDispatcher:
             steps = int(steps) if steps is not None else None
         except (TypeError, ValueError):
             steps = None
-        if "timeout_ms" not in out:
-            out["timeout_ms"] = max(1, steps) * MOVE_STEP_TIMEOUT_MS if steps else MOVE_DEFAULT_TIMEOUT_MS
-        if MOVE_CONTINUOUS:
-            for field in MOVE_CONTINUOUS_FIELDS:
-                out[field] = True
-        out["payload_json"] = {
-            "vx": out["vx"],
-            "vy": out["vy"],
-            "wz": out["wz"],
-            "timeout_ms": out["timeout_ms"],
+        timeout_ms = max(1, steps) * MOVE_STEP_TIMEOUT_MS if steps else MOVE_DEFAULT_TIMEOUT_MS
+        # 服务器最大只支持 2000ms，超过会被截断
+        timeout_ms = min(timeout_ms, 2000)
+        if original_command_type in DIRECTIONAL_MOVE_TYPES and MOVE_PRIME_TIMEOUT_MS > 0:
+            timeout_ms = MOVE_PRIME_TIMEOUT_MS
+
+        move_payload = {
+            "command_type": "move",
+            "params": {
+                "vx": vx,
+                "vy": vy,
+                "wz": wz,
+                "timeout_ms": timeout_ms,
+            },
         }
-        if MOVE_CONTINUOUS:
-            for field in MOVE_CONTINUOUS_FIELDS:
-                out["payload_json"][field] = True
-        return out
+        native_payload = self._build_native_move_payload(original_command_type, steps)
+        if native_payload:
+            move_payload[NATIVE_MOVE_PAYLOAD_KEY] = native_payload
+        return move_payload
 
-    def _inherit_voice_metadata(self, payload: dict, source_payload: dict) -> dict:
-        out = dict(payload)
-        for key in ("voice_angle", "voice_raw_angle", "voice_direction", "voice_speech_detected", "voice_doa_source"):
-            if key in source_payload:
-                out[key] = source_payload[key]
-        return out
+    def _build_native_move_payload(self, command_type: str, steps: int = None) -> dict:
+        if not MOVE_NATIVE_ENABLED or command_type not in DIRECTIONAL_MOVE_TYPES:
+            return {}
 
-    def _apply_default_move_velocity(self, out: dict, command_type: str, intent: str, direction: str):
         try:
-            has_velocity = any(abs(float(out.get(key, 0) or 0)) > 1e-6 for key in ("vx", "vy", "wz"))
+            step_count = int(steps) if steps is not None else MOVE_NATIVE_DEFAULT_STEPS
         except (TypeError, ValueError):
-            has_velocity = False
-        if has_velocity:
-            return
+            step_count = MOVE_NATIVE_DEFAULT_STEPS
+        step_count = max(MOVE_NATIVE_MIN_STEPS, step_count)
 
+        params = {
+            "step": step_count,
+            "timeout_ms": MOVE_NATIVE_TIMEOUT_MS,
+        }
+        linear_speed = abs(MOVE_NATIVE_LINEAR_SPEED)
+        yaw_speed = abs(MOVE_NATIVE_YAW_SPEED)
+        if command_type == "move_forward":
+            params["vx"] = linear_speed
+        elif command_type == "move_backward":
+            params["vx"] = -linear_speed
+        elif command_type == "move_left":
+            params["vy"] = linear_speed
+        elif command_type == "move_right":
+            params["vy"] = -linear_speed
+        elif command_type == "turn_left":
+            params["wz"] = yaw_speed
+        elif command_type == "turn_right":
+            params["wz"] = -yaw_speed
+
+        return {"command_type": command_type, "params": params}
+
+    def _resolve_default_velocity(self, command_type: str, intent: str, direction: str) -> tuple:
+        """根据意图/方向推断默认速度向量 (vx, vy, wz)"""
         motion = str(command_type or intent or "").lower()
         direction = str(direction or "").lower()
         if motion.endswith("forward") or direction == "forward":
-            out["vx"] = MOVE_LINEAR_SPEED
+            return (MOVE_LINEAR_SPEED, 0.0, 0.0)
         elif motion.endswith("backward") or direction == "backward":
-            out["vx"] = -MOVE_LINEAR_SPEED
+            return (-MOVE_LINEAR_SPEED, 0.0, 0.0)
         elif motion.endswith("left") or direction == "left":
             if "turn" in motion:
-                out["wz"] = MOVE_YAW_SPEED
-            else:
-                out["vy"] = MOVE_LINEAR_SPEED
+                return (0.0, 0.0, MOVE_YAW_SPEED)
+            return (0.0, MOVE_LINEAR_SPEED, 0.0)
         elif motion.endswith("right") or direction == "right":
             if "turn" in motion:
-                out["wz"] = -MOVE_YAW_SPEED
-            else:
-                out["vy"] = -MOVE_LINEAR_SPEED
+                return (0.0, 0.0, -MOVE_YAW_SPEED)
+            return (0.0, -MOVE_LINEAR_SPEED, 0.0)
+        return (0.0, 0.0, 0.0)
 
     def _extract_motion_command_type(self, command: dict) -> str:
         slots = command.get("slots") if isinstance(command.get("slots"), dict) else {}
@@ -581,23 +632,6 @@ def _extract_microphone_metadata(wake: dict) -> dict:
     }
     return {key: wake[key] for key in keys if key in wake}
 
-
-def _service_voice_metadata(envelope: dict) -> dict:
-    mic = envelope.get("microphone") if isinstance(envelope, dict) else {}
-    if not isinstance(mic, dict) or not mic:
-        return {}
-    mapping = {
-        "angle": "voice_angle",
-        "raw_angle": "voice_raw_angle",
-        "angle_direction": "voice_direction",
-        "speech_detected": "voice_speech_detected",
-        "doa_source": "voice_doa_source",
-    }
-    return {
-        dst_key: mic[src_key]
-        for src_key, dst_key in mapping.items()
-        if src_key in mic and mic[src_key] is not None
-    }
 
 
 def _audio_direction_metadata(mic: dict) -> dict:

@@ -5,12 +5,6 @@ import pipeline.command_dispatcher as command_dispatcher
 from pipeline.command_dispatcher import CommandDispatcher
 
 
-CONTINUOUS_MOVE_FIELDS = {
-    "continous_move": True,
-    "continuous_move": True,
-}
-
-
 class CommandDispatcherValidationTests(unittest.TestCase):
     def test_accepts_rule_command(self):
         dispatcher = CommandDispatcher()
@@ -71,7 +65,7 @@ class CommandDispatcherValidationTests(unittest.TestCase):
 
         self.assertEqual(
             dispatcher._make_service_payload(envelope),
-            {"command_type": "stand_down"},
+            {"command_type": "stand_down", "params": {}},
         )
 
     def test_service_payload_uses_motion_api_shape_for_stand_up(self):
@@ -89,10 +83,10 @@ class CommandDispatcherValidationTests(unittest.TestCase):
 
         self.assertEqual(
             dispatcher._make_service_payload(envelope),
-            {"command_type": "stand_up"},
+            {"command_type": "stand_up", "params": {}},
         )
 
-    def test_service_payload_normalizes_direction_move_to_continuous_move(self):
+    def test_service_payload_normalizes_direction_move_to_move_with_native_followup(self):
         dispatcher = CommandDispatcher()
         envelope = {
             "command": {
@@ -112,17 +106,19 @@ class CommandDispatcherValidationTests(unittest.TestCase):
             dispatcher._make_service_payload(envelope),
             {
                 "command_type": "move",
-                "vx": 0,
-                "vy": -0.3,
-                "wz": 0,
-                "timeout_ms": 2400,
-                **CONTINUOUS_MOVE_FIELDS,
-                "payload_json": {
+                "params": {
                     "vx": 0,
                     "vy": -0.3,
                     "wz": 0,
-                    "timeout_ms": 2400,
-                    **CONTINUOUS_MOVE_FIELDS,
+                    "timeout_ms": 2000,
+                },
+                command_dispatcher.NATIVE_MOVE_PAYLOAD_KEY: {
+                    "command_type": "move_right",
+                    "params": {
+                        "step": 2,
+                        "timeout_ms": 1000,
+                        "vy": -1.0,
+                    },
                 },
             },
         )
@@ -142,17 +138,55 @@ class CommandDispatcherValidationTests(unittest.TestCase):
             dispatcher._make_service_payload(envelope),
             {
                 "command_type": "move",
-                "vx": 0.2,
-                "vy": 0,
-                "wz": 0,
-                "timeout_ms": 1200,
-                **CONTINUOUS_MOVE_FIELDS,
-                "payload_json": {
+                "params": {
                     "vx": 0.2,
-                    "vy": 0,
-                    "wz": 0,
+                    "vy": 0.0,
+                    "wz": 0.0,
                     "timeout_ms": 1200,
-                    **CONTINUOUS_MOVE_FIELDS,
+                },
+                command_dispatcher.NATIVE_MOVE_PAYLOAD_KEY: {
+                    "command_type": "move_forward",
+                    "params": {
+                        "step": 1,
+                        "timeout_ms": 1000,
+                        "vx": 1.0,
+                    },
+                },
+            },
+        )
+
+    def test_directional_move_can_match_test_py_timing_and_steps(self):
+        dispatcher = CommandDispatcher()
+        envelope = {
+            "command": {
+                "intent": "move_forward",
+                "slots": {"direction": "forward", "steps": 1},
+                "raw": "forward",
+                "source": "rule",
+            }
+        }
+
+        with mock.patch.object(command_dispatcher, "MOVE_PRIME_TIMEOUT_MS", 1500):
+            with mock.patch.object(command_dispatcher, "MOVE_NATIVE_MIN_STEPS", 3):
+                payload = dispatcher._make_service_payload(envelope)
+
+        self.assertEqual(
+            payload,
+            {
+                "command_type": "move",
+                "params": {
+                    "vx": 0.2,
+                    "vy": 0.0,
+                    "wz": 0.0,
+                    "timeout_ms": 1500,
+                },
+                command_dispatcher.NATIVE_MOVE_PAYLOAD_KEY: {
+                    "command_type": "move_forward",
+                    "params": {
+                        "step": 3,
+                        "timeout_ms": 1000,
+                        "vx": 1.0,
+                    },
                 },
             },
         )
@@ -177,17 +211,11 @@ class CommandDispatcherValidationTests(unittest.TestCase):
             dispatcher._make_service_payload(envelope),
             {
                 "command_type": "move",
-                "vx": 0.5,
-                "vy": 0,
-                "wz": 0,
-                "timeout_ms": 2400,
-                **CONTINUOUS_MOVE_FIELDS,
-                "payload_json": {
+                "params": {
                     "vx": 0.5,
                     "vy": 0,
                     "wz": 0,
-                    "timeout_ms": 2400,
-                    **CONTINUOUS_MOVE_FIELDS,
+                    "timeout_ms": 2000,
                 },
             },
         )
@@ -203,15 +231,11 @@ class CommandDispatcherValidationTests(unittest.TestCase):
 
 
 class CommandDispatcherServiceTests(unittest.IsolatedAsyncioTestCase):
-    async def test_move_sequence_posts_stand_up_repeats_until_timeout_then_stops(self):
+    async def test_move_sequence_posts_stand_up_move_then_stop(self):
         dispatcher = CommandDispatcher()
         payload = {
             "command_type": "move",
-            "vx": 0.5,
-            "vy": 0,
-            "wz": 0,
-            "timeout_ms": 1200,
-            "payload_json": {"vx": 0.5, "vy": 0, "wz": 0, "timeout_ms": 1200},
+            "params": {"vx": 0.5, "vy": 0, "wz": 0, "timeout_ms": 1200},
         }
 
         async def fake_post(posted_payload):
@@ -222,12 +246,46 @@ class CommandDispatcherServiceTests(unittest.IsolatedAsyncioTestCase):
                 result = await dispatcher._post_move_sequence(payload)
 
         self.assertTrue(dispatcher._service_ok(result))
-        self.assertEqual(post_payload.await_count, 10)
+        self.assertEqual(post_payload.await_count, 3)
         posted = [call.args[0] for call in post_payload.await_args_list]
-        self.assertEqual(posted[0], {"command_type": "stand_up"})
-        self.assertEqual(posted[1:-1], [payload] * 8)
-        self.assertEqual(posted[-1], {"command_type": "stop"})
-        self.assertEqual(len(result["sequence"]), 10)
+        self.assertEqual(posted[0], {"command_type": "stand_up", "params": {}})
+        self.assertEqual(posted[1], payload)
+        self.assertEqual(posted[2], {"command_type": "stop", "params": {}})
+        self.assertEqual(len(result["sequence"]), 3)
+
+    async def test_directional_move_sequence_posts_native_followup_without_stop(self):
+        dispatcher = CommandDispatcher()
+        native_payload = {
+            "command_type": "move_forward",
+            "params": {"step": 3, "vx": 1.0, "timeout_ms": 1000},
+        }
+        payload = {
+            "command_type": "move",
+            "params": {"vx": 0.25, "vy": 0, "wz": 0, "timeout_ms": 1500},
+            command_dispatcher.NATIVE_MOVE_PAYLOAD_KEY: native_payload,
+        }
+
+        async def fake_post(posted_payload):
+            return {"http_status": 200, "json": {"ok": True}, "request_json": dict(posted_payload)}
+
+        with mock.patch.object(command_dispatcher, "MOVE_PREPARE_DELAY_MS", 2000):
+            with mock.patch.object(command_dispatcher, "MOVE_POST_MOVE_DELAY_MS", 2000):
+                with mock.patch.object(dispatcher, "_post_payload", mock.AsyncMock(side_effect=fake_post)) as post_payload:
+                    with mock.patch("pipeline.command_dispatcher.asyncio.sleep", mock.AsyncMock()) as sleep:
+                        result = await dispatcher._post_move_sequence(payload)
+
+        self.assertTrue(dispatcher._service_ok(result))
+        posted = [call.args[0] for call in post_payload.await_args_list]
+        self.assertEqual(
+            posted,
+            [
+                {"command_type": "stand_up", "params": {}},
+                {"command_type": "move", "params": {"vx": 0.25, "vy": 0, "wz": 0, "timeout_ms": 1500}},
+                native_payload,
+            ],
+        )
+        self.assertEqual([call.args[0] for call in sleep.await_args_list], [2.0, 2.0, 1.0])
+        self.assertEqual(len(result["sequence"]), 3)
 
 
 if __name__ == "__main__":

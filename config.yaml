@@ -9,7 +9,7 @@ services:
   asr_timeout: 90
 
 audio:
-  source: webrtc
+  source: onboard  # onboared webrtc
 
 models:
   asr: models/asr
@@ -152,18 +152,20 @@ command:
   output_dir: output
   service_url: http://10.10.20.82:8090/api/v1/local/motion
   service_timeout: 5
-  move_step_timeout_ms: 1200
+  move_step_timeout_ms: 600
   move_default_timeout_ms: 1200
   auto_stand_before_move: true
-  move_prepare_delay_ms: 1200
-  move_repeat_count: 5
-  move_repeat_interval_ms: 150
-  move_linear_speed: 0.2
+  move_prepare_delay_ms: 2000
+  move_linear_speed: 0.25
   move_yaw_speed: 0.5
-  move_continuous: true
-  move_continuous_fields:
-    - continous_move
-    - continuous_move
+  move_prime_timeout_ms: 1500
+  move_post_move_delay_ms: 2000
+  move_native_enabled: true
+  move_native_default_steps: 3
+  move_native_min_steps: 3
+  move_native_timeout_ms: 1000
+  move_native_linear_speed: 1.0
+  move_native_yaw_speed: 1.0
   move_stop_after_timeout: true
   success_audio: audio/曼波wow.mp3
   failed_audio: audio/曼波我嘞个豆.mp3

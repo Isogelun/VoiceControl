@@ -209,6 +209,17 @@ def parse_command_rule(text: str) -> Optional[dict]:
             "normalized": normalized,
             "source": "rule",
         }
+    if _looks_like_bare_forward_walk(normalized, compact, pinyin):
+        return {
+            "intent": "move_forward",
+            "slots": {
+                "direction": "forward",
+                "steps": _extract_steps(normalized),
+            },
+            "raw": text,
+            "normalized": normalized,
+            "source": "rule",
+        }
     return None
 
 
@@ -221,6 +232,22 @@ def _matches_any(compact: str, pinyin: str, phrases) -> bool:
         if phrase_pinyin and phrase_pinyin in pinyin:
             return True
     return False
+
+
+def _looks_like_bare_forward_walk(text: str, compact: str, pinyin: str) -> bool:
+    has_walk = "走" in compact or "zou" in pinyin
+    if not has_walk:
+        return False
+
+    blocked_direction_words = ("向后", "往后", "后退", "向左", "往左", "左转", "向右", "往右", "右转")
+    if any(word in text for word in blocked_direction_words):
+        return False
+
+    if re.search(r"\d+\s*步", text):
+        return True
+    if any(f"{word}步" in text for word in CN_NUMBERS):
+        return True
+    return "起来走" in text or compact in {"走", "走走"}
 
 
 def _extract_steps(text: str) -> int:
