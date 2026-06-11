@@ -5,6 +5,16 @@ server:
   service_timeout: 120
   gpu: false
 
+inference:
+  # python: run Python ASR/NLU child services from run.py
+  # rust: run voice-infer as the ASR/NLU service from run.py
+  # external: do not start ASR/NLU; use services.asr_url and services.nlu_url
+  backend: rust
+  rust_binary:
+  rust_ort_dylib:
+  rust_ort_opt: disable
+  rust_asr_max_new_tokens: 16
+
 services:
   asr_timeout: 3
   asr_retries: 0

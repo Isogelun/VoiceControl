@@ -19,6 +19,7 @@ import logging
 import os
 import signal
 import socket
+import subprocess
 import sys
 import multiprocessing
 import threading
@@ -38,6 +39,7 @@ DEFAULT_CONFIG_PATH = os.path.join(PROJECT_ROOT, "config.yaml")
 DEFAULT_SERVICE_TIMEOUT = float(os.environ.get("SERVICE_START_TIMEOUT", "120"))
 CHILD_PROCS = []
 _CLEANING_UP = False
+RUST_BINARY_NAMES = ("voice-infer.exe", "voice-infer")
 
 CONFIG_ENV_MAP = {
     ("robot", "ip"): "UNITREE_ROBOT_IP",
@@ -234,26 +236,48 @@ def _apply_config_env(config):
             os.environ[env_name] = _env_value(value)
 
 
+def _proc_alive(proc):
+    if isinstance(proc, subprocess.Popen):
+        return proc.poll() is None
+    return proc.is_alive()
+
+
+def _proc_exitcode(proc):
+    if isinstance(proc, subprocess.Popen):
+        return proc.poll()
+    return proc.exitcode
+
+
+def _proc_wait(proc, timeout):
+    if isinstance(proc, subprocess.Popen):
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            pass
+    else:
+        proc.join(timeout=timeout)
+
+
 def _cleanup_children(reason="exit"):
     global _CLEANING_UP
     if _CLEANING_UP:
         return
     _CLEANING_UP = True
 
-    live = [proc for proc in CHILD_PROCS if proc.is_alive()]
+    live = [proc for proc in CHILD_PROCS if _proc_alive(proc)]
     if live:
         log.info("清理子进程 (%s): %s", reason, [proc.pid for proc in live])
 
     for proc in live:
         proc.terminate()
     for proc in live:
-        proc.join(timeout=3)
+        _proc_wait(proc, timeout=3)
     for proc in live:
-        if proc.is_alive():
+        if _proc_alive(proc):
             log.warning("子进程 PID=%s 未正常退出，强制结束", proc.pid)
             proc.kill()
     for proc in live:
-        proc.join(timeout=1)
+        _proc_wait(proc, timeout=1)
 
 
 def _install_cleanup_handlers():
@@ -312,6 +336,65 @@ def _start_nlu_server(model_dir, tokenizer_dir, host, port, use_gpu=False):
     run_serve(enc_sess, dec_sess, tokenizer, host, port)
 
 
+def _find_rust_binary(configured_path=None):
+    candidates = []
+    if configured_path:
+        candidates.append(_project_path(configured_path))
+
+    dist_dir = os.path.join(PROJECT_ROOT, "dist")
+    if os.path.isdir(dist_dir):
+        for name in sorted(os.listdir(dist_dir)):
+            if name.startswith("voice-infer-ubuntu2204-"):
+                for binary_name in RUST_BINARY_NAMES:
+                    candidates.append(os.path.join(dist_dir, name, binary_name))
+
+    for profile in ("release", "debug"):
+        for binary_name in RUST_BINARY_NAMES:
+            candidates.append(os.path.join(PROJECT_ROOT, "voice-infer", "target", profile, binary_name))
+
+    for path in candidates:
+        if path and os.path.isfile(path):
+            return path
+
+    raise RuntimeError(
+        "Rust backend selected but voice-infer binary was not found. "
+        "Build it with `cd voice-infer && cargo build --release`, "
+        "or set inference.rust_binary in config.yaml."
+    )
+
+
+def _start_rust_infer(args, inference_config):
+    binary = _find_rust_binary(inference_config.get("rust_binary"))
+    env = os.environ.copy()
+
+    ort_dylib = inference_config.get("rust_ort_dylib")
+    if ort_dylib:
+        env["ORT_DYLIB_PATH"] = _project_path(ort_dylib)
+
+    ort_opt = inference_config.get("rust_ort_opt")
+    if ort_opt:
+        env["VOICE_INFER_ORT_OPT"] = str(ort_opt)
+
+    max_new_tokens = inference_config.get("rust_asr_max_new_tokens")
+    if max_new_tokens is not None:
+        env["QWEN_ASR_MAX_NEW_TOKENS"] = str(max_new_tokens)
+
+    cmd = [
+        binary,
+        "--asr-model-dir", args.asr_model,
+        "--nlu-model-dir", args.nlu_model,
+        "--nlu-tokenizer-dir", args.nlu_tokenizer,
+        "--host", args.host,
+        "--asr-port", str(args.asr_port),
+        "--nlu-port", str(args.nlu_port),
+    ]
+    if args.gpu:
+        cmd.append("--gpu")
+
+    log.info("Starting Rust voice-infer: %s", " ".join(cmd))
+    return subprocess.Popen(cmd, cwd=PROJECT_ROOT, env=env)
+
+
 def _wait_for_service(name, health_url, proc, timeout=DEFAULT_SERVICE_TIMEOUT, interval=0.5):
     """等待子进程服务通过健康检查"""
     deadline = time.time() + timeout
@@ -354,6 +437,29 @@ def _tcp_port_open(ip: str, port: int, timeout: float = 1.5) -> bool:
             return True
     except OSError:
         return False
+
+
+def _wait_for_service(name, health_url, proc, timeout=DEFAULT_SERVICE_TIMEOUT, interval=0.5):
+    deadline = time.time() + timeout
+    next_log = time.time() + 5
+    while time.time() < deadline:
+        if proc is not None and not _proc_alive(proc):
+            raise RuntimeError(f"{name} process exited, exitcode={_proc_exitcode(proc)}")
+        try:
+            with urllib_request.urlopen(health_url, timeout=2) as resp:
+                if resp.status == 200:
+                    log.info("%s health check passed: %s", name, health_url)
+                    return
+        except urllib_error.URLError:
+            pass
+        except Exception:
+            log.exception("%s health check failed", name)
+        if time.time() >= next_log:
+            remain = max(0, int(deadline - time.time()))
+            log.info("waiting for %s service, ~%ss left: %s", name, remain, health_url)
+            next_log = time.time() + 5
+        time.sleep(interval)
+    raise TimeoutError(f"{name} health check timeout: {health_url}")
 
 
 def _preflight_webrtc(args) -> bool:
@@ -440,7 +546,11 @@ def main():
     _apply_config_env(config)
 
     server_config = _cfg(config, "server", default={}) or {}
+    inference_config = _cfg(config, "inference", default={}) or {}
     models_config = _cfg(config, "models", default={}) or {}
+    inference_backend = str(inference_config.get("backend", "python")).lower()
+    if inference_backend not in {"python", "rust", "external"}:
+        raise RuntimeError("inference.backend must be one of: python, rust, external")
     audio_source = str(_cfg(config, "audio", "source", default="onboard")).lower()
     if args.onboard:
         audio_source = "onboard"
@@ -522,6 +632,50 @@ def main():
 
     if args.webrtc and not args.skip_preflight and not _preflight_webrtc(args):
         raise SystemExit(2)
+
+    if inference_backend in {"rust", "external"}:
+        asr_proc = None
+        nlu_proc = None
+
+        if inference_backend == "external":
+            asr_url = os.environ.get("ASR_URL") or _cfg(config, "services", "asr_url")
+            nlu_url = os.environ.get("NLU_URL") or _cfg(config, "services", "nlu_url")
+            if not asr_url or not nlu_url:
+                raise RuntimeError("external inference backend requires services.asr_url and services.nlu_url")
+            os.environ["ASR_URL"] = asr_url
+            os.environ["NLU_URL"] = nlu_url
+            asr_health_url = asr_url.rsplit("/", 1)[0] + "/health"
+            nlu_health_url = nlu_url.rsplit("/", 1)[0] + "/health"
+            log.info("Using external inference services: ASR=%s NLU=%s", asr_url, nlu_url)
+        else:
+            _ensure_port_available("ASR", args.host, args.asr_port)
+            _ensure_port_available("NLU", args.host, args.nlu_port)
+            os.environ["ASR_URL"] = f"http://127.0.0.1:{args.asr_port}/asr"
+            os.environ["NLU_URL"] = f"http://127.0.0.1:{args.nlu_port}/nlu"
+            asr_health_url = f"http://127.0.0.1:{args.asr_port}/health"
+            nlu_health_url = f"http://127.0.0.1:{args.nlu_port}/health"
+            rust_proc = _start_rust_infer(args, inference_config)
+            CHILD_PROCS[:] = [rust_proc]
+            asr_proc = rust_proc
+            nlu_proc = rust_proc
+            log.info("Rust voice-infer PID=%d (ASR port %d, NLU port %d)", rust_proc.pid, args.asr_port, args.nlu_port)
+
+        try:
+            _wait_for_service("ASR", asr_health_url, asr_proc, timeout=args.service_timeout)
+            _wait_for_service("NLU", nlu_health_url, nlu_proc, timeout=args.service_timeout)
+
+            if args.hardware_serial:
+                from pipeline.hardware_serial import run_hardware_serial
+                asyncio.run(run_hardware_serial())
+            elif args.onboard:
+                from pipeline.onboard import run_onboard
+                asyncio.run(run_onboard())
+            else:
+                from pipeline.main import run_webrtc
+                asyncio.run(run_webrtc())
+        finally:
+            _cleanup_children("main finally")
+        return
 
     _ensure_port_available("ASR", args.host, args.asr_port)
     _ensure_port_available("NLU", args.host, args.nlu_port)
