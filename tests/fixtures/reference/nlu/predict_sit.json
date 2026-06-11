@@ -1,0 +1,19 @@
+{
+  "input": "坐下",
+  "raw_output": "{\"type\":\"cmd\",\"payload\":{\"command_type\":\"Sit\",\"payload_json\":{}}}",
+  "parsed": {
+    "intent": "sit_down",
+    "slots": {
+      "command_type": "Sit"
+    },
+    "raw": "{\"type\":\"cmd\",\"payload\":{\"command_type\":\"Sit\",\"payload_json\":{}}}",
+    "command": {
+      "type": "cmd",
+      "payload": {
+        "command_type": "Sit",
+        "payload_json": {}
+      }
+    },
+    "source": "model"
+  }
+}

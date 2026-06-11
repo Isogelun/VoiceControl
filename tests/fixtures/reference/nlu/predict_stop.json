@@ -1,0 +1,26 @@
+{
+  "input": "停止",
+  "raw_output": "{\"type\":\"cmd\",\"payload\":{\"command_type\":\"Trigger\",\"payload_json\":{\"data\":{\"event\":\"dancelebrate\"}}}}",
+  "parsed": {
+    "intent": "trigger",
+    "slots": {
+      "data": {
+        "event": "dancelebrate"
+      },
+      "command_type": "Trigger"
+    },
+    "raw": "{\"type\":\"cmd\",\"payload\":{\"command_type\":\"Trigger\",\"payload_json\":{\"data\":{\"event\":\"dancelebrate\"}}}}",
+    "command": {
+      "type": "cmd",
+      "payload": {
+        "command_type": "Trigger",
+        "payload_json": {
+          "data": {
+            "event": "dancelebrate"
+          }
+        }
+      }
+    },
+    "source": "model"
+  }
+}

@@ -301,6 +301,7 @@ class VoicePipeline:
         self._pcm_buf = np.array([], dtype=np.int16)
         self._wake_metadata = {}
         self._feedback_suppress_until = 0.0
+        self._pending_latency_timing = None
         self._reset_speech_capture()
         log.info("Wake feedback enabled: %s", WAKE_FEEDBACK_ENABLED)
         log.info(
@@ -437,12 +438,15 @@ class VoicePipeline:
                 break
 
     async def _process_wake_utterance(self, pcm_bytes: bytes):
+        timing = {"started": time.perf_counter(), "vad_tail_ms": SILENCE_TIMEOUT_MS}
+        asr_started = time.perf_counter()
         text = await call_asr(pcm_bytes)
+        timing["asr_ms"] = _elapsed_ms(asr_started)
         normalized = normalize_asr_text(text)
         if text:
             log.info("唤醒检测 ASR: %s -> %s", text, normalized)
         if normalized and is_wake_phrase(normalized, self.wake_texts):
-            command_text = self._strip_wake_phrase(normalized)
+            command_text = self._extract_inline_command(normalized)
             if command_text:
                 log.info("Wake phrase and command in one utterance: %s", command_text)
                 self._wake_metadata = self._with_external_metadata({
@@ -452,7 +456,11 @@ class VoicePipeline:
                     "normalized_text": normalized,
                     "inline_command": True,
                 })
-                await self._process_command_text(command_text, text, command_text)
+                self._pending_latency_timing = timing
+                try:
+                    await self._process_command_text(command_text, text, command_text)
+                finally:
+                    self._pending_latency_timing = None
                 self._state = "waiting"
                 self._wake_metadata = {}
                 self._reset_speech_capture()
@@ -466,9 +474,12 @@ class VoicePipeline:
             })
 
     async def _process_utterance(self, pcm_bytes: bytes):
+        timing = {"started": time.perf_counter(), "vad_tail_ms": COMMAND_SILENCE_TIMEOUT_MS}
         try:
             log.info("识别中...")
+            asr_started = time.perf_counter()
             text = await call_asr(pcm_bytes)
+            timing["asr_ms"] = _elapsed_ms(asr_started)
             log.info("ASR: %s", text)
             if not text:
                 await self.dispatcher.play_unavailable()
@@ -480,7 +491,7 @@ class VoicePipeline:
 
             command_text = normalized
             if is_wake_phrase(normalized, getattr(self, "wake_texts", [])):
-                stripped = self._strip_wake_phrase(normalized)
+                stripped = self._extract_inline_command(normalized)
                 if stripped:
                     command_text = stripped
                     log.info("Command text after wake-prefix stripping: %s -> %s", normalized, command_text)
@@ -489,15 +500,20 @@ class VoicePipeline:
                     await self.dispatcher.play_unavailable()
                     return
 
+            parse_started = time.perf_counter()
             result = await self._parse_command_with_nlu(command_text)
+            timing["parse_ms"] = _elapsed_ms(parse_started)
             log.info("指令 JSON: %s", json.dumps(result, ensure_ascii=False))
+            dispatch_started = time.perf_counter()
             dispatch_result = await self.dispatcher.dispatch(
                 result,
                 text,
                 command_text,
                 self._with_external_metadata(dict(self._wake_metadata)),
             )
+            timing["dispatch_ms"] = _elapsed_ms(dispatch_started)
             log.info("指令分发结果: %s", json.dumps(dispatch_result, ensure_ascii=False))
+            self._log_command_latency("command", timing, result, dispatch_result)
             self._suppress_feedback_audio()
         except Exception:
             log.exception("处理语音指令失败，播放失败反馈")
@@ -506,12 +522,20 @@ class VoicePipeline:
             self._wake_metadata = {}
 
     async def _process_command_text(self, command_text: str, asr_text: str, normalized_text: str):
+        timing = getattr(self, "_pending_latency_timing", None)
+        if timing is None:
+            timing = {"started": time.perf_counter(), "vad_tail_ms": 0}
         try:
             wake_metadata = self._with_external_metadata(dict(self._wake_metadata))
+            parse_started = time.perf_counter()
             result = await self._parse_command_with_nlu(command_text)
+            timing["parse_ms"] = _elapsed_ms(parse_started)
             log.info("Command JSON: %s", json.dumps(result, ensure_ascii=False))
+            dispatch_started = time.perf_counter()
             dispatch_result = await self.dispatcher.dispatch(result, asr_text, normalized_text, wake_metadata)
+            timing["dispatch_ms"] = _elapsed_ms(dispatch_started)
             log.info("Command dispatch result: %s", json.dumps(dispatch_result, ensure_ascii=False))
+            self._log_command_latency("inline_wake", timing, result, dispatch_result)
             self._suppress_feedback_audio()
         except Exception:
             log.exception("处理内联命令失败，播放失败反馈")
@@ -522,6 +546,34 @@ class VoicePipeline:
             await self.dispatcher.play_unavailable()
         except Exception:
             log.exception("失败反馈音频播放异常")
+
+    def _log_command_latency(self, path: str, timing: dict, command: dict, dispatch_result: dict):
+        timing = timing or {}
+        post_vad_ms = _elapsed_ms(timing.get("started", time.perf_counter()))
+        vad_tail_ms = float(timing.get("vad_tail_ms", 0.0) or 0.0)
+        estimated_ms = vad_tail_ms + post_vad_ms
+        service_result = dispatch_result.get("service_result") if isinstance(dispatch_result, dict) else None
+        service_http = service_result.get("http_status") if isinstance(service_result, dict) else None
+        service_elapsed = service_result.get("elapsed_ms") if isinstance(service_result, dict) else None
+        queued = bool(service_result.get("queued")) if isinstance(service_result, dict) else False
+        log.info(
+            "Voice latency: path=%s vad_tail=%.0fms asr=%.1fms parse=%.1fms dispatch=%.1fms "
+            "post_vad=%.1fms estimated_speech_end_to_response=%.1fms intent=%s source=%s status=%s "
+            "service_http=%s service_elapsed=%s queued=%s",
+            path,
+            vad_tail_ms,
+            float(timing.get("asr_ms", 0.0) or 0.0),
+            float(timing.get("parse_ms", 0.0) or 0.0),
+            float(timing.get("dispatch_ms", 0.0) or 0.0),
+            post_vad_ms,
+            estimated_ms,
+            command.get("intent") if isinstance(command, dict) else None,
+            command.get("source") if isinstance(command, dict) else None,
+            dispatch_result.get("status") if isinstance(dispatch_result, dict) else None,
+            service_http,
+            service_elapsed,
+            queued,
+        )
 
     async def _parse_command_with_nlu(self, text: str) -> dict:
         if COMMAND_RULES_FAST_PATH:
@@ -558,6 +610,25 @@ class VoicePipeline:
             "raw": text,
         }
 
+    def _extract_inline_command(self, text: str) -> str:
+        candidate = self._strip_wake_phrase(text)
+        if not candidate:
+            return ""
+
+        candidate = normalize_asr_text(candidate)
+        for _ in range(3):
+            reduced = normalize_asr_text(_strip_leading_wake_aliases(candidate, self.wake_texts))
+            if reduced == candidate:
+                break
+            candidate = reduced
+            if not candidate:
+                return ""
+
+        candidate = _strip_boundary_punctuation(candidate)
+        if self._is_only_wake_alias(candidate):
+            return ""
+        return candidate
+
     def _strip_wake_phrase(self, text: str) -> str:
         normalized = normalize_asr_text(text)
         best = ""
@@ -572,6 +643,16 @@ class VoicePipeline:
             if len(candidate) > len(best):
                 best = candidate
         return normalize_asr_text(_strip_leading_wake_aliases(best, self.wake_texts))
+
+    def _is_only_wake_alias(self, text: str) -> bool:
+        compact = compact_text(normalize_asr_text(text))
+        if not compact:
+            return True
+        for phrase in self.wake_texts:
+            phrase_compact = compact_text(normalize_asr_text(phrase))
+            if phrase_compact and compact == phrase_compact:
+                return True
+        return False
 
     @staticmethod
     def _slice_after_compact_phrase(text: str, phrase_compact: str):
@@ -771,12 +852,19 @@ class VoicePipeline:
             return
         loop.create_task(close_asr_session())
         loop.create_task(close_nlu_session())
+        dispatcher_close = getattr(getattr(self, "dispatcher", None), "close", None)
+        if dispatcher_close:
+            loop.create_task(dispatcher_close())
 
 
 def _dbfs(rms: float) -> float:
     if rms <= 0:
         return -120.0
     return max(-120.0, 20.0 * np.log10(rms / 32768.0))
+
+
+def _elapsed_ms(started: float) -> float:
+    return (time.perf_counter() - started) * 1000
 
 
 def _frame_rms(chunk: np.ndarray) -> float:

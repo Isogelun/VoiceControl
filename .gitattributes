@@ -1,0 +1,23 @@
+* text=auto
+
+*.md text eol=lf
+*.py text eol=lf
+*.rs text eol=lf
+*.toml text eol=lf
+*.lock text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.json text eol=lf
+*.sh text eol=lf
+*.ps1 text eol=crlf
+
+*.wav binary
+*.pcm binary
+*.npy binary
+*.onnx binary
+*.bin binary
+*.data binary
+*.dll binary
+*.so binary
+*.dylib binary
+*.pdb binary

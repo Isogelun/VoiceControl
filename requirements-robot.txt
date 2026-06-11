@@ -1,0 +1,33 @@
+# 机器狗端 (Go2 EDU / Jetson Orin, Python 3.8) 依赖
+# 只包含 pipeline-only 模式所需的包，不含 ASR/NLU 推理服务依赖
+#
+# 安装方法:
+#   pip install -r requirements-robot.txt
+#
+# 启动方法 (先在上位机启动 ASR/NLU 服务，再在机器狗上执行):
+#   python run.py --pipeline-only --onboard
+#   python run.py --pipeline-only --hardware-serial
+
+# 音频 / VAD
+numpy>=1.24.0,<2.0          # 2.0+ 需要 Python 3.9+
+sounddevice>=0.4.6
+soundfile>=0.12.1
+webrtcvad>=2.0.10
+pydub>=0.25.0
+
+# 唤醒词 (KWS)
+sherpa-onnx==1.10.46        # 支持 Python 3.6+
+
+# 网络 (HTTP 调用上位机 ASR/NLU 服务)
+aiohttp>=3.9.0,<3.10.0      # 3.10+ 不再支持 Python 3.8
+
+# 硬件
+pyserial>=3.5
+pyusb>=1.2.1
+# libusb-package            # 仅 Windows 需要，Jetson 上不需要
+
+# 配置
+pyyaml>=6.0
+
+# 音频文件播放 (本地 fallback beep)
+# sounddevice 已涵盖，pydub 处理 mp3 格式

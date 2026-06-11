@@ -260,7 +260,7 @@ def _extract_steps(text: str) -> int:
     return 1
 
 
-def _extract_angle(text: str) -> int | None:
+def _extract_angle(text: str) -> Optional[int]:
     match = re.search(r"(\d+)\s*度", text)
     if match:
         return int(match.group(1))

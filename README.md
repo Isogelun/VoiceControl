@@ -10,30 +10,46 @@
 
 ```
 VoiceControl/
-├── run.py                 # 统一入口
-├── config.yaml            # 默认运行配置
-├── pyproject.toml         # 统一依赖
-├── asr/                   # ASR 模块（SenseVoiceSmall ONNX）
-│   ├── engine.py          #   推理引擎
-│   └── server.py          #   HTTP 服务
-├── nlu/                   # NLU 模块（Mengzi-T5 ONNX）
-│   ├── engine.py          #   推理引擎
-│   ├── server.py          #   HTTP 服务
-│   └── tokenizer/         #   分词器配置
-├── pipeline/              # 语音处理管道
-│   ├── main.py            #   主程序（WebRTC 模式）
-│   ├── onboard.py         #   本机麦克风模式
-│   ├── asr_client.py      #   ASR HTTP 客户端
-│   ├── nlu_client.py      #   NLU HTTP 客户端
-│   ├── speaker.py         #   音频播放
-│   └── cleaner.py         #   定时清理
-├── models/                # 模型文件（gitignored）
-│   ├── asr/               #   model_q8.onnx + tokens.txt
-│   ├── nlu/               #   encoder.onnx + decoder.onnx
-│   └── kws/               #   sherpa-onnx 唤醒词模型
-├── audio/                 # 音频资源
-└── scripts/
-    └── deploy.sh          # 一键部署
+├── run.py                       # 统一入口
+├── config.yaml                  # 默认运行配置
+├── pyproject.toml               # 统一依赖 (Python ≥3.10)
+├── requirements-robot.txt       # 机器狗端依赖 (Python 3.8)
+├── requirements-server-py38.txt # 上位机依赖降级版 (Python 3.8)
+├── asr/                         # ASR 模块（Qwen3-ASR ONNX）
+│   ├── engine.py                #   推理引擎
+│   └── server.py                #   HTTP 服务
+├── nlu/                         # NLU 模块（Mengzi-T5 ONNX）
+│   ├── engine.py                #   推理引擎
+│   ├── server.py                #   HTTP 服务
+│   └── tokenizer/               #   分词器配置
+├── pipeline/                    # 语音处理管道
+│   ├── main.py                  #   主程序（状态机 + 三种音频源）
+│   ├── command_dispatcher.py    #   指令分发与动作执行
+│   ├── text_normalizer.py       #   同音纠错 + 规则兜底
+│   ├── onboard.py               #   本机麦克风模式
+│   ├── hardware_serial.py       #   6 通道串口麦克风阵列
+│   ├── audio_preprocessor.py    #   DC 去除 / 噪声门 / 高通滤波
+│   ├── respeaker.py             #   ReSpeaker DoA 读取
+│   ├── asr_client.py            #   ASR HTTP 客户端
+│   ├── nlu_client.py            #   NLU HTTP 客户端
+│   └── speaker.py               #   Go2 扬声器播放
+├── voice-infer/                 # Rust 推理服务 (替代 Python ASR+NLU)
+│   ├── Cargo.toml
+│   └── src/                     #   详见 voice-infer/README.md
+├── models/                      # 模型文件（gitignored）
+│   ├── asr/                     #   encoder.int4.onnx + decoder + tokenizer
+│   ├── nlu/                     #   encoder.onnx + decoder.onnx + tokenizer/
+│   └── kws/                     #   sherpa-onnx 唤醒词模型
+├── audio/                       # 音频反馈资源
+├── scripts/
+│   ├── deploy.sh                #   一键部署
+│   ├── export_reference.py      #   导出 Rust 重写参考数据
+│   └── compare_outputs.py       #   Python/Rust 输出对比
+├── docs/
+│   ├── rust-rewrite-plan.md     #   Rust 重写方案
+│   └── rust-rewrite-checklist.md #  实施清单 (83 checkboxes)
+└── tests/
+    └── fixtures/                #   测试音频 + 参考数据
 ```
 
 ## 快速开始
@@ -172,6 +188,51 @@ python run.py --pipeline-only          # 仅 Pipeline（服务已在其他地方
 - ASR 文本归一化：在进入 NLU 前修正“网前走”“左传”等常见误识别。
 - 命令规则兜底：高频动作命令先匹配有限规则（快路径），未命中再调用 NLU；当 NLU 服务不可用或返回 unknown 时，同样回落到规则库，避免整句指令被直接丢弃。
 
+## 部署方案
+
+### 方案 A: Python 全栈 (推荐快速上手)
+
+上位机和机器狗都用 Python，适合 Python 3.10 环境：
+
+```bash
+pip install -e .
+python run.py
+```
+
+### 方案 B: Python 3.8 降级部署
+
+部署环境只有 Python 3.8 时，上位机依赖可降级运行，代码无需修改：
+
+```bash
+# 上位机 (ASR + NLU 推理服务)
+pip install -r requirements-server-py38.txt
+python -m asr.server --serve --port 8000 &
+python -m nlu.server --serve --port 8001 &
+
+# 机器狗端 (pipeline-only 模式)
+pip install -r requirements-robot.txt
+python run.py --pipeline-only --onboard
+```
+
+关键版本约束：onnxruntime≤1.19.2、transformers≤4.38.2、librosa<0.11、numpy<2.0。
+
+### 方案 C: Rust 推理服务 (零 Python 部署)
+
+用 Rust 单二进制替代 Python ASR+NLU 服务，部署只需一个可执行文件 + 模型：
+
+```bash
+# 构建
+cd voice-infer && cargo build --release
+
+# 运行 (需要 libonnxruntime.so)
+export ORT_DYLIB_PATH=/path/to/libonnxruntime.so.1.19.2
+./target/release/voice-infer \
+    --asr-model-dir ../models/asr \
+    --nlu-model-dir ../models/nlu
+```
+
+HTTP 接口与 Python 版 100% 兼容，机器狗端代码无需修改。详见 [voice-infer/README.md](voice-infer/README.md) 和 [docs/rust-rewrite-plan.md](docs/rust-rewrite-plan.md)。
+
 ## 性能
 
 | 音频长度 | CPU 推理 | 说明 |
@@ -179,6 +240,7 @@ python run.py --pipeline-only          # 仅 Pipeline（服务已在其他地方
 | ~1s | ~90ms | 实时率 11x |
 | ~2s | ~130ms | 实时率 15x |
 
-- 模型：Q8 INT8 量化，234MB
-- 引擎：onnxruntime 1.14.0
-- Python：3.8 ~ 3.10
+- ASR 模型：Qwen3-ASR INT4 量化，encoder 711MB + decoder 0.6MB
+- NLU 模型：Mengzi-T5，encoder 418MB + decoder 621MB
+- 引擎：onnxruntime (Python 1.23+ / Rust 1.19.2)
+- 运行环境：Python 3.10 / Python 3.8（降级）/ Rust（无 Python）

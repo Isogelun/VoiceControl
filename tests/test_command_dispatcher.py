@@ -287,6 +287,68 @@ class CommandDispatcherServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([call.args[0] for call in sleep.await_args_list], [2.0, 2.0, 1.0])
         self.assertEqual(len(result["sequence"]), 3)
 
+    async def test_fast_move_sequence_queues_native_first_without_waiting(self):
+        dispatcher = CommandDispatcher()
+        native_payload = {
+            "command_type": "move_forward",
+            "params": {"step": 3, "vx": 1.0, "timeout_ms": 1000},
+        }
+        payload = {
+            "command_type": "move",
+            "params": {"vx": 0.25, "vy": 0, "wz": 0, "timeout_ms": 1500},
+            command_dispatcher.NATIVE_MOVE_PAYLOAD_KEY: native_payload,
+        }
+
+        async def fake_post(posted_payload):
+            return {"http_status": 200, "json": {"ok": True}, "request_json": dict(posted_payload)}
+
+        command_dispatcher.BACKGROUND_POST_TASKS.clear()
+        with mock.patch.object(command_dispatcher, "MOVE_FAST_RESPONSE", True):
+            with mock.patch.object(command_dispatcher, "MOVE_FAST_NATIVE_FIRST", True):
+                with mock.patch.object(command_dispatcher, "MOVE_FAST_FOLLOWUP_MOVE", True):
+                    with mock.patch.object(command_dispatcher, "MOVE_FAST_FOLLOWUP_DELAY_MS", 0):
+                        with mock.patch.object(dispatcher, "_post_payload", mock.AsyncMock(side_effect=fake_post)) as post_payload:
+                            result = await dispatcher._post_move_sequence(payload)
+                            for _ in range(5):
+                                if post_payload.await_count >= 2:
+                                    break
+                                await command_dispatcher.asyncio.sleep(0)
+
+        self.assertEqual(result["http_status"], 202)
+        self.assertTrue(result["queued"])
+        self.assertEqual(result["request_json"], native_payload)
+        posted = [call.args[0] for call in post_payload.await_args_list]
+        self.assertEqual(posted, [native_payload, {"command_type": "move", "params": {"vx": 0.25, "vy": 0, "wz": 0, "timeout_ms": 1500}}])
+
+    async def test_fast_non_move_dispatch_queues_without_waiting(self):
+        dispatcher = CommandDispatcher()
+
+        async def fake_post(posted_payload):
+            return {"http_status": 200, "json": {"ok": True}, "request_json": dict(posted_payload)}
+
+        command_dispatcher.BACKGROUND_POST_TASKS.clear()
+        with mock.patch.object(command_dispatcher, "COMMAND_SERVICE_URL", "http://motion.local"):
+            with mock.patch.object(command_dispatcher, "COMMAND_FAST_RESPONSE", True):
+                with mock.patch.object(dispatcher, "_post_payload", mock.AsyncMock(side_effect=fake_post)) as post_payload:
+                    with mock.patch.object(dispatcher, "_maybe_play_feedback", mock.AsyncMock()):
+                        result = await dispatcher.dispatch(
+                            {"intent": "stand_up", "slots": {}, "source": "rule"},
+                            "stand up",
+                            "stand up",
+                        )
+                    for _ in range(5):
+                        if post_payload.await_count >= 1:
+                            break
+                        await command_dispatcher.asyncio.sleep(0)
+
+        self.assertEqual(result["status"], "completed")
+        self.assertTrue(result["service_result"]["queued"])
+        self.assertEqual(
+            result["service_result"]["request_json"],
+            {"command_type": "stand_up", "params": {}},
+        )
+        post_payload.assert_awaited_once_with({"command_type": "stand_up", "params": {}})
+
 
 if __name__ == "__main__":
     unittest.main()

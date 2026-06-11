@@ -1,0 +1,216 @@
+[
+  {
+    "input": "{\"type\":\"cmd\",\"payload\":{\"command_type\":\"MoveForward\",\"payload_json\":{\"vx\":0.3}}}",
+    "expected": {
+      "intent": "move_forward",
+      "slots": {
+        "vx": 0.3,
+        "direction": "forward",
+        "command_type": "MoveForward"
+      },
+      "raw": "{\"type\":\"cmd\",\"payload\":{\"command_type\":\"MoveForward\",\"payload_json\":{\"vx\":0.3}}}",
+      "command": {
+        "type": "cmd",
+        "payload": {
+          "command_type": "MoveForward",
+          "payload_json": {
+            "vx": 0.3
+          }
+        }
+      },
+      "source": "model"
+    }
+  },
+  {
+    "input": "{\"type\":\"cmd\",\"payload\":{\"command_type\":\"Move\",\"payload_json\":{\"vx\":0.0,\"vy\":0.3,\"vyaw\":0.0}}}",
+    "expected": {
+      "intent": "move_left",
+      "slots": {
+        "vx": 0.0,
+        "vy": 0.3,
+        "vyaw": 0.0,
+        "direction": "left",
+        "command_type": "Move"
+      },
+      "raw": "{\"type\":\"cmd\",\"payload\":{\"command_type\":\"Move\",\"payload_json\":{\"vx\":0.0,\"vy\":0.3,\"vyaw\":0.0}}}",
+      "command": {
+        "type": "cmd",
+        "payload": {
+          "command_type": "Move",
+          "payload_json": {
+            "vx": 0.0,
+            "vy": 0.3,
+            "vyaw": 0.0
+          }
+        }
+      },
+      "source": "model"
+    }
+  },
+  {
+    "input": "{\"type\":\"cmd\",\"payload\":{\"command_type\":\"Move\",\"payload_json\":{\"vx\":0.0,\"vy\":0.0,\"vyaw\":0.5}}}",
+    "expected": {
+      "intent": "turn_left",
+      "slots": {
+        "vx": 0.0,
+        "vy": 0.0,
+        "vyaw": 0.5,
+        "direction": "left",
+        "command_type": "Move"
+      },
+      "raw": "{\"type\":\"cmd\",\"payload\":{\"command_type\":\"Move\",\"payload_json\":{\"vx\":0.0,\"vy\":0.0,\"vyaw\":0.5}}}",
+      "command": {
+        "type": "cmd",
+        "payload": {
+          "command_type": "Move",
+          "payload_json": {
+            "vx": 0.0,
+            "vy": 0.0,
+            "vyaw": 0.5
+          }
+        }
+      },
+      "source": "model"
+    }
+  },
+  {
+    "input": "{\"type\":\"cmd\",\"payload\":{\"command_type\":\"Sit\",\"payload_json\":{}}}",
+    "expected": {
+      "intent": "sit_down",
+      "slots": {
+        "command_type": "Sit"
+      },
+      "raw": "{\"type\":\"cmd\",\"payload\":{\"command_type\":\"Sit\",\"payload_json\":{}}}",
+      "command": {
+        "type": "cmd",
+        "payload": {
+          "command_type": "Sit",
+          "payload_json": {}
+        }
+      },
+      "source": "model"
+    }
+  },
+  {
+    "input": "{\"type\":\"cmd\",\"payload\":{\"command_type\":\"StopMove\",\"payload_json\":{}}}",
+    "expected": {
+      "intent": "stop",
+      "slots": {
+        "command_type": "StopMove"
+      },
+      "raw": "{\"type\":\"cmd\",\"payload\":{\"command_type\":\"StopMove\",\"payload_json\":{}}}",
+      "command": {
+        "type": "cmd",
+        "payload": {
+          "command_type": "StopMove",
+          "payload_json": {}
+        }
+      },
+      "source": "model"
+    }
+  },
+  {
+    "input": "{\"type\":\"chat\",\"payload\":{\"message\":\"你好，我是曼波\"}}",
+    "expected": {
+      "intent": "unknown",
+      "slots": {},
+      "raw": "{\"type\":\"chat\",\"payload\":{\"message\":\"你好，我是曼波\"}}",
+      "message": "你好，我是曼波",
+      "command": {
+        "type": "chat",
+        "payload": {
+          "message": "你好，我是曼波"
+        }
+      },
+      "source": "chat"
+    }
+  },
+  {
+    "input": "{\"intent\":\"move_forward\",\"slots\":{\"direction\":\"forward\",\"steps\":3}}",
+    "expected": {
+      "intent": "move_forward",
+      "slots": {
+        "direction": "forward",
+        "steps": 3
+      },
+      "raw": "{\"intent\":\"move_forward\",\"slots\":{\"direction\":\"forward\",\"steps\":3}}"
+    }
+  },
+  {
+    "input": "{\"intent\":\"stop\"}",
+    "expected": {
+      "intent": "stop",
+      "slots": {},
+      "raw": "{\"intent\":\"stop\"}"
+    }
+  },
+  {
+    "input": "intent=stop, direction=none",
+    "expected": {
+      "intent": "stop",
+      "slots": {
+        "direction": "none"
+      },
+      "raw": "intent=stop, direction=none"
+    }
+  },
+  {
+    "input": "你好世界",
+    "expected": {
+      "intent": "unknown",
+      "slots": {},
+      "raw": "你好世界"
+    }
+  },
+  {
+    "input": "",
+    "expected": {
+      "intent": "unknown",
+      "slots": {},
+      "raw": ""
+    }
+  },
+  {
+    "input": "{\"type\":\"cmd\",\"payload\":{\"command_type\":\"RecoveryStand\",\"payload_json\":{}}}",
+    "expected": {
+      "intent": "stand_up",
+      "slots": {
+        "command_type": "RecoveryStand"
+      },
+      "raw": "{\"type\":\"cmd\",\"payload\":{\"command_type\":\"RecoveryStand\",\"payload_json\":{}}}",
+      "command": {
+        "type": "cmd",
+        "payload": {
+          "command_type": "RecoveryStand",
+          "payload_json": {}
+        }
+      },
+      "source": "model"
+    }
+  },
+  {
+    "input": "{\"type\":\"cmd\",\"payload\":{\"command_type\":\"Move\",\"payload_json\":{\"vx\":0.0,\"vy\":0.0,\"vyaw\":0.0}}}",
+    "expected": {
+      "intent": "move",
+      "slots": {
+        "vx": 0.0,
+        "vy": 0.0,
+        "vyaw": 0.0,
+        "command_type": "Move"
+      },
+      "raw": "{\"type\":\"cmd\",\"payload\":{\"command_type\":\"Move\",\"payload_json\":{\"vx\":0.0,\"vy\":0.0,\"vyaw\":0.0}}}",
+      "command": {
+        "type": "cmd",
+        "payload": {
+          "command_type": "Move",
+          "payload_json": {
+            "vx": 0.0,
+            "vy": 0.0,
+            "vyaw": 0.0
+          }
+        }
+      },
+      "source": "model"
+    }
+  }
+]

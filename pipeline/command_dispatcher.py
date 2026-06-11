@@ -24,6 +24,8 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 COMMAND_OUTPUT_DIR = Path(os.environ.get("COMMAND_OUTPUT_DIR", _PROJECT_ROOT / "output"))
 COMMAND_SERVICE_URL = os.environ.get("COMMAND_SERVICE_URL", "").strip()
 COMMAND_SERVICE_TIMEOUT = float(os.environ.get("COMMAND_SERVICE_TIMEOUT", "5"))
+COMMAND_FAST_RESPONSE = os.environ.get("COMMAND_FAST_RESPONSE", "0") not in {"0", "false", "False", "no", ""}
+COMMAND_FEEDBACK_ASYNC = os.environ.get("COMMAND_FEEDBACK_ASYNC", "1") not in {"0", "false", "False", "no", ""}
 MOVE_STEP_TIMEOUT_MS = int(os.environ.get("MOVE_STEP_TIMEOUT_MS", "1200"))
 MOVE_DEFAULT_TIMEOUT_MS = int(os.environ.get("MOVE_DEFAULT_TIMEOUT_MS", "1200"))
 AUTO_STAND_BEFORE_MOVE = os.environ.get("AUTO_STAND_BEFORE_MOVE", "1") not in {"0", "false", "False", "no", ""}
@@ -38,6 +40,11 @@ MOVE_NATIVE_MIN_STEPS = max(1, int(os.environ.get("MOVE_NATIVE_MIN_STEPS", "1"))
 MOVE_NATIVE_TIMEOUT_MS = max(1, int(os.environ.get("MOVE_NATIVE_TIMEOUT_MS", "1000")))
 MOVE_NATIVE_LINEAR_SPEED = float(os.environ.get("MOVE_NATIVE_LINEAR_SPEED", "1"))
 MOVE_NATIVE_YAW_SPEED = float(os.environ.get("MOVE_NATIVE_YAW_SPEED", "1"))
+MOVE_FAST_RESPONSE = os.environ.get("MOVE_FAST_RESPONSE", "0") not in {"0", "false", "False", "no", ""}
+MOVE_FAST_NATIVE_FIRST = os.environ.get("MOVE_FAST_NATIVE_FIRST", "1") not in {"0", "false", "False", "no", ""}
+MOVE_FAST_FOLLOWUP_MOVE = os.environ.get("MOVE_FAST_FOLLOWUP_MOVE", "1") not in {"0", "false", "False", "no", ""}
+MOVE_FAST_FOLLOWUP_DELAY_MS = max(0, int(os.environ.get("MOVE_FAST_FOLLOWUP_DELAY_MS", "80")))
+MOVE_FAST_AUTO_STAND = os.environ.get("MOVE_FAST_AUTO_STAND", "0") not in {"0", "false", "False", "no", ""}
 MOVE_STOP_AFTER_TIMEOUT = os.environ.get("MOVE_STOP_AFTER_TIMEOUT", "1") not in {"0", "false", "False", "no", ""}
 COMMAND_SUCCESS_AUDIO = os.environ.get(
     "COMMAND_SUCCESS_AUDIO",
@@ -109,11 +116,14 @@ MOVE_COMMAND_TYPES = {
 DIRECTIONAL_MOVE_TYPES = MOVE_COMMAND_TYPES - {"move"}
 NATIVE_MOVE_PAYLOAD_KEY = "_native_move_payload"
 ACTION_AUDIO_MAP = {}
+BACKGROUND_POST_TASKS = set()
+BACKGROUND_FEEDBACK_TASKS = set()
 
 
 class CommandDispatcher:
     def __init__(self, speaker=None):
         self.speaker = speaker
+        self._service_session = None
 
     async def dispatch(
         self,
@@ -140,7 +150,7 @@ class CommandDispatcher:
             except Exception as exc:
                 envelope["status"] = "failed"
                 envelope["reason"] = "service_error"
-                envelope["error"] = str(exc)
+                envelope["error"] = _describe_error(exc)
                 self._persist(envelope)
                 log.exception("指令服务调用失败")
                 await self.play_unavailable()
@@ -168,16 +178,16 @@ class CommandDispatcher:
         return envelope
 
     async def play_success(self, command: dict = None):
-        await self._play_feedback(self._select_success_audio(command), success=True)
+        await self._maybe_play_feedback(self._select_success_audio(command), success=True)
 
     async def play_failure(self):
-        await self._play_feedback(COMMAND_FAILED_AUDIO, success=False)
+        await self._maybe_play_feedback(COMMAND_FAILED_AUDIO, success=False)
 
     async def play_unavailable(self):
-        await self._play_feedback(COMMAND_UNAVAILABLE_AUDIO, success=False)
+        await self._maybe_play_feedback(COMMAND_UNAVAILABLE_AUDIO, success=False)
 
     async def play_audio(self, path: str, success: bool = True):
-        await self._play_feedback(path, success=success)
+        await self._maybe_play_feedback(path, success=success)
 
     def _select_success_audio(self, command: dict = None) -> str:
         audio_map = _action_audio_map()
@@ -256,12 +266,18 @@ class CommandDispatcher:
         if payload.get("command_type") in MOVE_COMMAND_TYPES:
             return await self._post_move_sequence(payload)
 
+        if COMMAND_FAST_RESPONSE:
+            return self._queue_fast_payload(payload)
+
         return await self._post_payload(payload)
 
     async def _post_move_sequence(self, payload: dict) -> dict:
         """按 test.py 的动作顺序发送：stand_up -> move -> 可选原生方向动作。"""
         native_payload = payload.get(NATIVE_MOVE_PAYLOAD_KEY) if isinstance(payload, dict) else None
         move_payload = self._public_payload(payload)
+        if MOVE_FAST_RESPONSE:
+            return self._queue_fast_move_sequence(move_payload, native_payload)
+
         timeout_ms = self._move_timeout_ms(move_payload)
         sequence = []
 
@@ -317,6 +333,62 @@ class CommandDispatcher:
         move_result["sequence"] = sequence
         return move_result
 
+    def _queue_fast_move_sequence(self, move_payload: dict, native_payload: dict = None) -> dict:
+        """Queue motion commands without waiting for blocking motion-service responses."""
+        initial_payload = native_payload if native_payload and MOVE_FAST_NATIVE_FIRST else move_payload
+        followups = []
+        if native_payload and initial_payload is native_payload and MOVE_FAST_FOLLOWUP_MOVE:
+            followups.append((MOVE_FAST_FOLLOWUP_DELAY_MS, move_payload))
+        elif native_payload and initial_payload is move_payload:
+            followups.append((MOVE_FAST_FOLLOWUP_DELAY_MS, native_payload))
+
+        if MOVE_FAST_AUTO_STAND and AUTO_STAND_BEFORE_MOVE:
+            followups.insert(0, (0, {"command_type": "stand_up", "params": {}}))
+
+        sequence = [{"queued": True, "request_json": initial_payload}]
+        sequence.extend({"queued": True, "delay_ms": delay_ms, "request_json": payload} for delay_ms, payload in followups)
+        task = asyncio.create_task(self._post_payload_sequence_background(initial_payload, followups))
+        BACKGROUND_POST_TASKS.add(task)
+        task.add_done_callback(BACKGROUND_POST_TASKS.discard)
+        log.info("Queued fast motion sequence: %s", json.dumps(sequence, ensure_ascii=False))
+        return {
+            "http_status": 202,
+            "queued": True,
+            "request_json": initial_payload,
+            "sequence": sequence,
+        }
+
+    def _queue_fast_payload(self, payload: dict) -> dict:
+        task = asyncio.create_task(self._post_payload_background(payload))
+        BACKGROUND_POST_TASKS.add(task)
+        task.add_done_callback(BACKGROUND_POST_TASKS.discard)
+        log.info("Queued fast command payload: %s", json.dumps(payload, ensure_ascii=False))
+        return {
+            "http_status": 202,
+            "queued": True,
+            "request_json": payload,
+        }
+
+    async def _post_payload_background(self, payload: dict):
+        try:
+            result = await self._post_payload(payload)
+            log.info("Fast command background result: %s", json.dumps(result, ensure_ascii=False))
+        except Exception as exc:
+            log.exception("Fast command background post failed: %s", _describe_error(exc))
+
+    async def _post_payload_sequence_background(self, initial_payload: dict, followups: list):
+        posted = []
+        try:
+            initial_result = await self._post_payload(initial_payload)
+            posted.append(initial_result)
+            for delay_ms, payload in followups:
+                if delay_ms > 0:
+                    await asyncio.sleep(delay_ms / 1000.0)
+                posted.append(await self._post_payload(payload))
+            log.info("Fast motion background results: %s", json.dumps(posted, ensure_ascii=False))
+        except Exception:
+            log.exception("Fast motion background post failed")
+
     def _public_payload(self, payload: dict) -> dict:
         return {
             key: value
@@ -332,21 +404,36 @@ class CommandDispatcher:
             return MOVE_DEFAULT_TIMEOUT_MS
 
     async def _post_payload(self, payload: dict) -> dict:
-        timeout = aiohttp.ClientTimeout(total=COMMAND_SERVICE_TIMEOUT)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            log.info("Posting motion command to %s: %s", COMMAND_SERVICE_URL, json.dumps(payload, ensure_ascii=False))
-            async with session.post(COMMAND_SERVICE_URL, json=payload) as resp:
-                text = await resp.text()
-                result = {
-                    "http_status": resp.status,
-                    "body": text,
-                    "request_json": payload,
-                }
-                try:
-                    result["json"] = json.loads(text) if text else {}
-                except json.JSONDecodeError:
-                    pass
-                return result
+        session = await self._get_service_session()
+        started = time.perf_counter()
+        log.info("Posting motion command to %s: %s", COMMAND_SERVICE_URL, json.dumps(payload, ensure_ascii=False))
+        async with session.post(COMMAND_SERVICE_URL, json=payload) as resp:
+            text = await resp.text()
+            elapsed_ms = (time.perf_counter() - started) * 1000
+            result = {
+                "http_status": resp.status,
+                "body": text,
+                "request_json": payload,
+                "elapsed_ms": round(elapsed_ms, 1),
+            }
+            try:
+                result["json"] = json.loads(text) if text else {}
+            except json.JSONDecodeError:
+                pass
+            log.info("Motion service response: status=%s elapsed=%.1fms", resp.status, elapsed_ms)
+            return result
+
+    async def _get_service_session(self):
+        if getattr(self, "_service_session", None) is None or self._service_session.closed:
+            timeout = aiohttp.ClientTimeout(total=COMMAND_SERVICE_TIMEOUT)
+            connector = aiohttp.TCPConnector(limit=4, keepalive_timeout=30)
+            self._service_session = aiohttp.ClientSession(timeout=timeout, connector=connector)
+        return self._service_session
+
+    async def close(self):
+        if getattr(self, "_service_session", None) is not None and not self._service_session.closed:
+            await self._service_session.close()
+        self._service_session = None
 
     def _make_service_payload(self, envelope: dict) -> dict:
         command = envelope.get("command") if isinstance(envelope, dict) else {}
@@ -539,6 +626,22 @@ class CommandDispatcher:
         log.warning("反馈音频不存在或无法播放: %s", path)
         if not self.speaker:
             await _play_local_beep(success=success)
+
+
+    async def _maybe_play_feedback(self, path: str, success: bool):
+        if not COMMAND_FEEDBACK_ASYNC:
+            await self._play_feedback(path, success=success)
+            return
+        task = asyncio.create_task(self._play_feedback(path, success=success))
+        BACKGROUND_FEEDBACK_TASKS.add(task)
+        task.add_done_callback(BACKGROUND_FEEDBACK_TASKS.discard)
+
+
+def _describe_error(exc: Exception) -> str:
+    text = str(exc)
+    if text:
+        return f"{type(exc).__name__}: {text}"
+    return type(exc).__name__
 
 
 async def _play_local_file(path: str):
