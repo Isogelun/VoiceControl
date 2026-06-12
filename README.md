@@ -1,261 +1,150 @@
-# VoiceControl
+﻿# VoiceControl
 
-面向宇树 Go2 机器狗的语音控制系统。主链路是：
-
+闈㈠悜瀹囨爲 Go2 鏈哄櫒鐙楃殑璇煶鎺у埗绯荤粺銆?
 ```text
-唤醒词检测 -> VAD 语音切分 -> ASR 语音识别 -> NLU 意图理解 -> 指令 JSON -> 机器狗动作/语音反馈
+鍞ら啋璇?-> VAD 璇煶鍒囧垎 -> ASR 璇煶璇嗗埆 -> NLU 鎰忓浘鐞嗚В -> 鎸囦护 JSON -> 鏈哄櫒鐙楀姩浣?璇煶鍙嶉
 ```
 
-项目当前包含两套推理实现：
+椤圭洰鐜板湪淇濈暀涓ゅ鎺ㄧ悊鍚庣锛?
+- `python`锛氬師濮?Python ASR/NLU 鏈嶅姟锛岄€傚悎寮€鍙戣皟璇曘€?- `rust`锛歚voice-infer/` Rust ASR/NLU 鏈嶅姟锛岄€傚悎 Ubuntu 22.04 鐪熸満閮ㄧ讲銆?
+绗竴娆℃嬁鍒颁唬鐮侊紝璇峰厛鐪嬶細
 
-- Python 推理服务：现有主实现，包含 ASR、NLU、Pipeline、Go2 WebRTC/串口/本机麦克风接入。
-- Rust 推理服务：位于 `voice-infer/`，目标是用单二进制替代 Python ASR+NLU，降低 Ubuntu 22.04 机器狗端部署复杂度。
-
-## 当前状态
-
-- Python 全链路仍是主要可运行路径。
-- Rust `voice-infer` 已能编译并通过默认测试：`33 passed, 6 ignored`。
-- Rust NLU 真实 ONNX 推理、HTTP `/nlu` 已在 Windows 本地通过验证。
-- Rust ASR HTTP `/asr` 已能跑通测试音频并返回与 Python 参考一致的文本。
-- Rust ASR 仍有一个 `decoder_init` logits 严格数值对齐测试未完全收口，端到端文本结果已经可用。
-- 大模型、ONNX Runtime 下载包、虚拟环境和编译产物不入库，见 `.gitignore`。
-
-更详细的 Rust 进度见：
-
-- `docs/rust-rewrite-status.md`
-- `docs/windows-rust-e2e.md`
-- `docs/ubuntu2204-rust-deploy.md`
-- `voice-infer/README.md`
-
-## 目录结构
+- [docs/getting-started.md](docs/getting-started.md)锛氱幆澧冨噯澶囥€佹ā鍨嬫斁缃€乄indows 鎵撳寘銆佺湡鏈洪儴缃插畬鏁存祦绋嬨€?- [docs/robot-production-deploy.md](docs/robot-production-deploy.md)锛歎buntu 22.04 鐪熸満鐢熶骇閮ㄧ讲銆乻ystemd銆佹棩蹇楀拰鏁呴殰鎺掓煡銆?- [docs/ubuntu2204-rust-deploy.md](docs/ubuntu2204-rust-deploy.md)锛歎buntu 22.04 Rust 鏈嶅姟閮ㄧ讲缁嗚妭銆?- [voice-infer/README.md](voice-infer/README.md)锛歊ust 鎺ㄧ悊鏈嶅姟鎺ュ彛鍜屾祴璇曡鏄庛€?
+## 褰撳墠鐘舵€?
+- Python 鍏ㄩ摼璺粛鍙繍琛屻€?- Rust `voice-infer` 榛樿娴嬭瘯閫氳繃锛岀湡瀹?ONNX Runtime 鎺ㄧ悊宸插湪 Windows 鏈湴鍜?aarch64 浜ゅ弶缂栬瘧璺緞楠岃瘉銆?- Windows 鍙€氳繃 `scripts/build_robot_deploy_bundle.bat` 涓€閿敓鎴愮湡鏈洪儴缃插寘銆?- 澶фā鍨嬨€丱NNX Runtime 涓嬭浇鍖呫€佽櫄鎷熺幆澧冨拰缂栬瘧浜х墿涓嶆彁浜ゅ埌 Git銆?
+## 鐩綍缁撴瀯
 
 ```text
 VoiceControl/
-├── run.py                         # Python 统一启动入口
-├── config.yaml                    # 默认运行配置
-├── pyproject.toml                 # Python 3.10 依赖
-├── requirements-robot.txt         # 机器狗端 Python 3.8 依赖
-├── requirements-server-py38.txt   # 上位机/服务端 Python 3.8 依赖
-├── asr/                           # Python ASR 服务与推理
-├── nlu/                           # Python NLU 服务与推理
-├── pipeline/                      # 唤醒、VAD、ASR/NLU 客户端、动作分发
-├── unitree_webrtc_connect/        # Unitree Go2 WebRTC 接入
-├── voice-infer/                   # Rust ASR+NLU 推理服务
-├── scripts/                       # 部署、参考数据导出、对比脚本
-├── tests/                         # Python 测试与参考数据
-├── docs/                          # 设计、部署、Rust 重写文档
-├── audio/                         # 反馈音频资源
-└── models/                        # 模型目录，本地放置，不提交 Git
+鈹溾攢鈹€ run.py                         # 缁熶竴鍚姩鍏ュ彛
+鈹溾攢鈹€ config.yaml                    # 榛樿閰嶇疆
+鈹溾攢鈹€ asr/                           # Python ASR
+鈹溾攢鈹€ nlu/                           # Python NLU
+鈹溾攢鈹€ pipeline/                      # 鍞ら啋銆乂AD銆丄SR/NLU 瀹㈡埛绔€佸姩浣滃垎鍙?鈹溾攢鈹€ unitree_webrtc_connect/        # Unitree Go2 WebRTC 鎺ュ叆
+鈹溾攢鈹€ voice-infer/                   # Rust ASR/NLU 鎺ㄧ悊鏈嶅姟
+鈹溾攢鈹€ scripts/                       # 鎵撳寘銆侀儴缃层€侀獙璇佽剼鏈?鈹溾攢鈹€ docs/                          # 椤圭洰鏂囨。
+鈹溾攢鈹€ tests/                         # 娴嬭瘯涓庡弬鑰冩暟鎹?鈹溾攢鈹€ audio/                         # 鍙嶉闊抽
+鈹斺攢鈹€ models/                        # 鏈湴妯″瀷鐩綍锛屼笉鍏ュ簱
 ```
 
-## 模型文件
+## 蹇€熼儴缃?
+Windows 寮€鍙戞満涓婂畨瑁?Rust銆乑ig銆乣cargo-zigbuild` 鍚庯紝鐩存帴杩愯锛?
+```powershell
+scripts\build_robot_deploy_bundle.bat
+```
 
-模型文件默认放在 `models/`，该目录已被 `.gitignore` 忽略。
+榛樿鐢熸垚 `aarch64 Ubuntu 22.04` 鐪熸満閮ㄧ讲鍖咃細
 
 ```text
-models/
-├── asr/
-│   ├── encoder.int4.onnx
-│   ├── decoder*
-│   ├── decoder_weights.int4.data
-│   ├── embed_tokens.bin
-│   └── tokenizer.json
-├── nlu/
-│   ├── encoder.onnx
-│   ├── decoder.onnx
-│   └── tokenizer/
-└── kws/
-    └── sherpa-onnx wake word models
+dist/robot-deploy-aarch64-<timestamp>/
 ```
 
-不要把 `models/`、`.venv/`、`third_party/`、`voice-infer/target/` 提交到 GitHub。
+鎶婅鐩綍鎷峰埌鏈哄櫒鐙楁垨 Ubuntu 22.04 閮ㄧ讲鏈哄悗杩愯锛?
+```bash
+cd robot-deploy-aarch64-*
+chmod +x scripts/install_robot_target.sh
+scripts/install_robot_target.sh --mode webrtc
+```
 
-## Python 环境
+瀹夎瀹屾垚鍚庝細鐢熸垚 `start_robot.sh`锛?
+```bash
+./start_robot.sh
+```
 
-推荐开发环境使用 Python 3.10：
+濡傛灉瑕佸畨瑁呭埌 `/opt/voice-control` 骞舵敞鍐?systemd锛?
+```bash
+sudo -E scripts/install_robot_target.sh --install-dir /opt/voice-control --mode webrtc --systemd
+```
+
+涔熷彲浠ヤ笉瀹夎锛岀洿鎺ヨ繍琛?Python 鎵樼 Rust 鐨勫叆鍙ｏ細
+
+```bash
+chmod +x start_python_managed_rust.sh
+./start_python_managed_rust.sh --webrtc
+```
+
+濡傛灉浣跨敤鏈満楹﹀厠椋庯細
+
+```bash
+./start_python_managed_rust.sh --onboard
+```
+
+濡傛灉浣跨敤涓插彛楹﹀厠椋庨樀鍒楋細
+
+```bash
+./start_python_managed_rust.sh --hardware-serial
+```
+
+鏇村鍑嗗姝ラ鍜屾帓閿欒 [docs/getting-started.md](docs/getting-started.md)銆?
+## 鎺ㄧ悊鍚庣閫夋嫨
+
+`config.yaml` 涓娇鐢?`inference.backend` 鍒囨崲锛?
+```yaml
+inference:
+  backend: mixed    # python / rust / mixed / external
+```
+
+- `python`锛歚run.py` 鍚姩 Python ASR/NLU 鏈嶅姟銆?- `rust`锛歚run.py` 鍚姩 Rust `voice-infer` 鏈嶅姟銆?- `mixed`锛歅ython ASR + Rust NLU銆傚綋鍓?Unitree aarch64 鐪熸満鎺ㄨ崘璇ユā寮忥紝鍥犱负 Rust ASR 鍔犺浇 ASR INT4 ONNX 鏃朵細瑙﹀彂 ONNX Runtime aarch64 宕╂簝銆?- `external`锛歚run.py` 涓嶅惎鍔ㄦ帹鐞嗘湇鍔★紝鍙繛鎺?`services.asr_url` 鍜?`services.nlu_url`锛岄€傚悎 systemd 鍗曠嫭鎵樼 Rust 鏈嶅姟銆?
+## 妯″瀷鐩綍
+
+妯″瀷鏂囦欢闇€瑕佹湰鍦版斁缃紝榛樿缁撴瀯锛?
+```text
+models/
+鈹溾攢鈹€ asr/
+鈹?  鈹溾攢鈹€ encoder.int4.onnx
+鈹?  鈹溾攢鈹€ decoder*
+鈹?  鈹溾攢鈹€ decoder_weights.int4.data
+鈹?  鈹溾攢鈹€ embed_tokens.bin
+鈹?  鈹斺攢鈹€ tokenizer.json
+鈹溾攢鈹€ nlu/
+鈹?  鈹溾攢鈹€ encoder.onnx
+鈹?  鈹溾攢鈹€ decoder.onnx
+鈹?  鈹斺攢鈹€ tokenizer/
+鈹斺攢鈹€ kws/
+    鈹斺攢鈹€ sherpa-onnx wake word models
+```
+
+`models/` 浣撶Н寰堝ぇ锛屽凡琚?`.gitignore` 蹇界暐銆?
+## 甯哥敤鍛戒护
+
+Python 寮€鍙戠幆澧冿細
 
 ```bash
 pip install -e .
-```
-
-如果目标环境只有 Python 3.8，可以使用拆分依赖：
-
-```bash
-# 推理服务端
-pip install -r requirements-server-py38.txt
-
-# 机器狗端 pipeline
-pip install -r requirements-robot.txt
-```
-
-## 启动方式
-
-默认读取项目根目录的 `config.yaml`。
-
-```bash
-# 启动 ASR + NLU + pipeline，默认音频源由 config.yaml 的 audio.source 决定
-python run.py
-
-# 只启动 ASR HTTP 服务，默认端口 8000
-python run.py --serve-asr
-
-# 只启动 NLU HTTP 服务，默认端口 8001
-python run.py --serve-nlu
-
-# 只启动 pipeline，ASR/NLU 使用外部已启动服务
-python run.py --pipeline-only
-```
-
-音频源模式：
-
-```bash
-# 本机麦克风
 python run.py --onboard
-
-# Unitree Go2 WebRTC 音频
-python run.py --webrtc
-
-# 串口麦克风阵列/硬件唤醒
-python run.py --hardware-serial
 ```
 
-常用调试参数：
-
+鍙惎鍔?Python 鎺ㄧ悊鏈嶅姟锛?
 ```bash
-python run.py --config config.local.yaml
-python run.py --gpu
-python run.py --denoise
-python run.py --vad-mode silence --vad-silence-timeout-ms 500
-python run.py --preflight-only --webrtc
+python run.py --serve-asr
+python run.py --serve-nlu
 ```
 
-## 配置
-
-`config.yaml` 是主要配置入口。常用字段：
-
-```yaml
-server:
-  host: 0.0.0.0
-  asr_port: 8000
-  nlu_port: 8001
-  gpu: false
-
-inference:
-  backend: python   # python / rust / external
-  rust_binary:
-  rust_ort_dylib:
-
-audio:
-  source: onboard   # onboard / webrtc / hardware_serial
-
-models:
-  asr: models/asr
-  nlu: models/nlu
-  nlu_tokenizer: models/nlu/tokenizer
-
-services:
-  asr_timeout: 3
-  nlu_timeout: 1.2
-
-robot:
-  ip: 10.10.20.66
-  connection_method: LocalSTA
-
-vad:
-  mode: silence
-  silence_timeout_ms: 300
-  command_listen_timeout_ms: 8000
-
-command:
-  output_dir: output
-  service_url: http://127.0.0.1:8090/api/v1/local/motion
-```
-
-命令行参数优先级高于配置文件。部署到真实机器狗前，建议把本地 IP、动作服务地址、唤醒词、反馈音频路径放到 `config.local.yaml`，避免把个人环境配置提交到仓库。
-
-`inference.backend` 用于选择推理后端：
-
-- `python`：默认值，由 `run.py` 启动 Python ASR/NLU 服务。
-- `rust`：由 `run.py` 启动 `voice-infer`，pipeline 自动连接 Rust ASR/NLU。
-- `external`：`run.py` 不启动推理服务，只使用 `services.asr_url` 和 `services.nlu_url`，适合 systemd 单独托管 Rust 服务。
-
-## Rust 推理服务
-
-Rust 服务位于 `voice-infer/`，HTTP 接口目标是兼容 Python 版 ASR/NLU：
-
-- `POST /asr`
-- `POST /nlu`
-- `GET /health`
-
-Windows 本地验证示例：
-
-```powershell
-.\scripts\start_voice_infer_windows.ps1
-```
-
-手动启动示例：
-
-```powershell
-$env:ORT_DYLIB_PATH="E:\HuaJianCode\VoiceControl\third_party\onnxruntime-win-x64-1.19.2\lib\onnxruntime.dll"
-cd voice-infer
-cargo run -- --asr-model-dir ..\models\asr --nlu-model-dir ..\models\nlu
-```
-
-Ubuntu 22.04 打包：
-
-```bash
-bash scripts/package_voice_infer_linux.sh
-```
-
-详细说明见 `docs/ubuntu2204-rust-deploy.md`。
-
-## 测试
-
-Python 测试：
-
-```bash
-pytest
-```
-
-Rust 默认测试：
-
+Rust 鏈湴娴嬭瘯锛?
 ```bash
 cd voice-infer
 cargo test
 ```
 
-Rust ONNX Runtime 真实推理测试默认是 `ignored`，需要先配置 `ORT_DYLIB_PATH`，再显式运行指定测试。
-
-```bash
-cd voice-infer
-ORT_DYLIB_PATH=/path/to/libonnxruntime.so.1.19.2 cargo test test_predict_forward_matches_reference -- --ignored
-```
-
-Windows PowerShell：
+Windows 鐢熸垚鐪熸満閮ㄧ讲鍖咃細
 
 ```powershell
-$env:ORT_DYLIB_PATH="E:\path\to\onnxruntime.dll"
-cargo test test_predict_forward_matches_reference -- --ignored
+scripts\build_robot_deploy_bundle.bat
 ```
 
-## GitHub 提交注意事项
+Windows 浠呬氦鍙夌紪璇?Rust aarch64 鍖咃紝涓嶅寘鍚ā鍨嬶細
 
-应该提交：
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\cross_build_voice_infer_linux.ps1 -Arch aarch64
+```
 
-- Python 源码：`asr/`、`nlu/`、`pipeline/`、`unitree_webrtc_connect/`
-- Rust 源码：`voice-infer/src/`、`voice-infer/Cargo.toml`、`voice-infer/Cargo.lock`
-- 文档：`README.md`、`docs/`
-- 脚本：`scripts/`
-- 小型测试 fixture：`tests/fixtures/`、`voice-infer/tests/resources/`
-
-不应该提交：
-
+## 涓嶈鎻愪氦鐨勫唴瀹?
 - `models/`
 - `.venv/`
 - `third_party/`
 - `voice-infer/target/`
+- `dist/`
 - `output/`
 - `__pycache__/`
-- `*.pdb`、日志、本地临时文件
 
-如果模型需要对外分发，建议使用 GitHub Releases、对象存储或单独的模型下载脚本，不要直接放进 Git 仓库。
+濡傛灉闇€瑕佸垎鍙戞ā鍨嬶紝浣跨敤 GitHub Releases銆佸璞″瓨鍌ㄦ垨鍗曠嫭涓嬭浇鑴氭湰锛屼笉瑕佺洿鎺ユ斁杩?Git 浠撳簱銆?

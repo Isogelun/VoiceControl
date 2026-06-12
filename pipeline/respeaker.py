@@ -39,7 +39,7 @@ def env_bool(name: str, default: str = "0") -> bool:
     return os.environ.get(name, default) not in {"0", "false", "False", "no", ""}
 
 
-def parse_int(value: str | None, default: Optional[int] = None) -> Optional[int]:
+def parse_int(value: Optional[str], default: Optional[int] = None) -> Optional[int]:
     if value is None or str(value).strip() == "":
         return default
     return int(str(value).strip(), 0)

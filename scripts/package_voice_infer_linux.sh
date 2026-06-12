@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ORT_VERSION="${ORT_VERSION:-1.19.2}"
+ORT_VERSION="${ORT_VERSION:-1.23.0}"
 WITH_MODELS="${WITH_MODELS:-0}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -20,7 +20,7 @@ Options:
   --with-models   Copy models/asr and models/nlu into the package.
 
 Environment:
-  ORT_VERSION     ONNX Runtime version. Default: 1.19.2
+  ORT_VERSION     ONNX Runtime version. Default: 1.23.0
   WITH_MODELS     Set to 1 to copy models without passing --with-models.
 EOF
 }
@@ -108,6 +108,9 @@ mkdir -p "$PKG_DIR/models"
 
 cp "$VOICE_INFER_DIR/target/release/voice-infer" "$PKG_DIR/voice-infer"
 cp "$ORT_LIB" "$PKG_DIR/libonnxruntime.so.${ORT_VERSION}"
+if [[ -f "$ORT_DIR/lib/libonnxruntime_providers_shared.so" ]]; then
+  cp "$ORT_DIR/lib/libonnxruntime_providers_shared.so" "$PKG_DIR/libonnxruntime_providers_shared.so"
+fi
 ln -sf "libonnxruntime.so.${ORT_VERSION}" "$PKG_DIR/libonnxruntime.so"
 
 if [[ "$WITH_MODELS" == "1" ]]; then

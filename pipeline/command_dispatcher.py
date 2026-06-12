@@ -100,8 +100,8 @@ INTENT_COMMAND_TYPES = {
     "sit_down": "stand_down",
     "lie_down": "lie_down",
     "stop": "stop",
-    "greet": "greet",
-    "shake_body": "shake_body",
+    "greet": "hello",
+    "shake_body": "wiggle_hips",
     "stretch": "stretch",
 }
 MOVE_COMMAND_TYPES = {

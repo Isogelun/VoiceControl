@@ -51,14 +51,11 @@ WEBRTC_TARGET_PEAK = float(os.environ.get("WEBRTC_TARGET_PEAK", "18000"))
 WEBRTC_CONNECT_RETRIES = max(1, int(os.environ.get("UNITREE_WEBRTC_CONNECT_RETRIES", "3")))
 WEBRTC_RETRY_DELAY_MS = max(0, int(os.environ.get("UNITREE_WEBRTC_RETRY_DELAY_MS", "5000")))
 KWS_MODEL_DIR = os.environ.get("KWS_MODEL_DIR", os.path.join(_PROJECT_ROOT, "models", "kws"))
-WAKE_KEYWORD = os.environ.get("WAKE_KEYWORD", "n ǐ h ǎo h uā h uā @你好花花")
-WAKE_BACKEND = os.environ.get("WAKE_BACKEND", "asr" if os.name == "nt" else "kws").lower()
-WAKE_TEXT = os.environ.get("WAKE_TEXT", "你好花花,你好，花花,花花")
-WAKE_ALIASES = os.environ.get(
-    "WAKE_ALIASES",
-    "你好曼波,曼波,慢播,快播,那波,南波,慢波,曼播,你好慢播,你好快播,你好那波,你好南波",
-)
-WAKE_AUDIO = os.environ.get("WAKE_AUDIO", os.path.join(_PROJECT_ROOT, "audio", "xuanxinghuida.mp3"))
+WAKE_KEYWORD = os.environ.get("WAKE_KEYWORD", "")
+WAKE_BACKEND = os.environ.get("WAKE_BACKEND", "asr").lower()
+WAKE_TEXT = os.environ.get("WAKE_TEXT", "")
+WAKE_ALIASES = os.environ.get("WAKE_ALIASES", "")
+WAKE_AUDIO = os.environ.get("WAKE_AUDIO", "")
 
 WAKE_FEEDBACK_ENABLED = os.environ.get("WAKE_FEEDBACK_ENABLED", "0") not in {"0", "false", "False", "no", ""}
 # 默认开启：NLU 不可用或返回 unknown 时，用规则库兜底高频命令，避免整句指令直接被丢弃。
@@ -270,6 +267,8 @@ class VoicePipeline:
             [t.strip() for t in WAKE_TEXT.split(",") if t.strip()]
             + [t.strip() for t in WAKE_ALIASES.split(",") if t.strip()]
         )
+        if not self.wake_texts and self.wake_backend in ("asr", "kws"):
+            log.warning("未配置唤醒词 (wake.text / wake.aliases 为空)，唤醒功能将无法工作，请在 config.yaml 中设置")
         self.kws = None
         self.kws_stream = None
         if self.wake_backend == "kws":
@@ -465,7 +464,7 @@ class VoicePipeline:
                 self._wake_metadata = {}
                 self._reset_speech_capture()
                 return
-            log.info("唤醒词 [你好花花] 检测到，开始监听...")
+            log.info("唤醒词 [%s] 检测到，开始监听...", normalized)
             self._enter_listening({
                 "source": "asr",
                 "keyword": normalized,

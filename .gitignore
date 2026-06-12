@@ -1,6 +1,8 @@
 # Large model/runtime artifacts
 models/
 third_party/
+onnxruntime-linux-*/
+onnxruntime-win-*/
 
 # Python
 __pycache__/

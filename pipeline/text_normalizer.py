@@ -20,6 +20,12 @@ HOMOPHONE_REPLACEMENTS = {
     "画画": "花花",
     "华华": "花花",
     "哗哗": "花花",
+    "漫波": "曼波",
+    "慢波": "曼波",
+    "慢播": "曼波",
+    "曼播": "曼波",
+    "蛮波": "曼波",
+    "满波": "曼波",
     "网前走": "往前走",
     "望前走": "往前走",
     "王前走": "往前走",
@@ -114,6 +120,20 @@ PINYIN_CHAR_MAP = {
     "伸": "shen",
     "懒": "lan",
     "腰": "yao",
+    "曼": "man",
+    "漫": "man",
+    "慢": "man",
+    "蛮": "man",
+    "满": "man",
+    "波": "bo",
+    "播": "bo",
+    "伯": "bo",
+    "柏": "bo",
+    "博": "bo",
+    "泊": "bo",
+    "笨": "ben",
+    "奔": "ben",
+    "本": "ben",
 }
 
 
@@ -153,8 +173,12 @@ def compact_text(text: str) -> str:
     return "".join(ch for ch in text.lower() if ch.isalnum())
 
 
+_LEADING_NOISE_RE = re.compile(r'^[a-zA-Z]+(?=[^\x00-\x7f])')
+
+
 def normalize_asr_text(text: str) -> str:
     text = (text or "").strip()
+    text = _LEADING_NOISE_RE.sub('', text)
     for wrong, right in HOMOPHONE_REPLACEMENTS.items():
         text = text.replace(wrong, right)
     return text

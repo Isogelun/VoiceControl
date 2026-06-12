@@ -19,6 +19,7 @@ import logging
 import os
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import multiprocessing
@@ -341,6 +342,9 @@ def _find_rust_binary(configured_path=None):
     if configured_path:
         candidates.append(_project_path(configured_path))
 
+    for binary_name in RUST_BINARY_NAMES:
+        candidates.append(os.path.join(PROJECT_ROOT, "rust", binary_name))
+
     dist_dir = os.path.join(PROJECT_ROOT, "dist")
     if os.path.isdir(dist_dir):
         for name in sorted(os.listdir(dist_dir)):
@@ -363,13 +367,33 @@ def _find_rust_binary(configured_path=None):
     )
 
 
-def _start_rust_infer(args, inference_config):
+def _start_rust_infer(args, inference_config, service_args=None):
     binary = _find_rust_binary(inference_config.get("rust_binary"))
+    if os.name != "nt" and not os.access(binary, os.X_OK):
+        os.chmod(binary, os.stat(binary).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     env = os.environ.copy()
+
+    detected_ort = None
+    rust_dir = os.path.join(PROJECT_ROOT, "rust")
+    if os.path.isdir(rust_dir):
+        ort_candidates = sorted(
+            os.path.join(rust_dir, name)
+            for name in os.listdir(rust_dir)
+            if name.startswith("libonnxruntime.so.")
+        )
+        if ort_candidates:
+            detected_ort = ort_candidates[-1]
 
     ort_dylib = inference_config.get("rust_ort_dylib")
     if ort_dylib:
         env["ORT_DYLIB_PATH"] = _project_path(ort_dylib)
+    elif detected_ort:
+        env["ORT_DYLIB_PATH"] = detected_ort
+    elif env.get("ORT_DYLIB_PATH") and not os.path.isfile(env["ORT_DYLIB_PATH"]):
+        env.pop("ORT_DYLIB_PATH", None)
+
+    if env.get("ORT_DYLIB_PATH") and not os.path.isfile(env["ORT_DYLIB_PATH"]):
+        raise RuntimeError(f"ORT_DYLIB_PATH points to a missing file: {env['ORT_DYLIB_PATH']}")
 
     ort_opt = inference_config.get("rust_ort_opt")
     if ort_opt:
@@ -378,6 +402,8 @@ def _start_rust_infer(args, inference_config):
     max_new_tokens = inference_config.get("rust_asr_max_new_tokens")
     if max_new_tokens is not None:
         env["QWEN_ASR_MAX_NEW_TOKENS"] = str(max_new_tokens)
+
+    threads = inference_config.get("rust_threads")
 
     cmd = [
         binary,
@@ -388,6 +414,10 @@ def _start_rust_infer(args, inference_config):
         "--asr-port", str(args.asr_port),
         "--nlu-port", str(args.nlu_port),
     ]
+    if threads is not None:
+        cmd.extend(["--threads", str(threads)])
+    if service_args:
+        cmd.extend(service_args)
     if args.gpu:
         cmd.append("--gpu")
 
@@ -549,8 +579,8 @@ def main():
     inference_config = _cfg(config, "inference", default={}) or {}
     models_config = _cfg(config, "models", default={}) or {}
     inference_backend = str(inference_config.get("backend", "python")).lower()
-    if inference_backend not in {"python", "rust", "external"}:
-        raise RuntimeError("inference.backend must be one of: python, rust, external")
+    if inference_backend not in {"python", "rust", "mixed", "external"}:
+        raise RuntimeError("inference.backend must be one of: python, rust, mixed, external")
     audio_source = str(_cfg(config, "audio", "source", default="onboard")).lower()
     if args.onboard:
         audio_source = "onboard"
@@ -632,6 +662,43 @@ def main():
 
     if args.webrtc and not args.skip_preflight and not _preflight_webrtc(args):
         raise SystemExit(2)
+
+    if inference_backend == "mixed":
+        _ensure_port_available("ASR", args.host, args.asr_port)
+        _ensure_port_available("NLU", args.host, args.nlu_port)
+
+        os.environ["ASR_URL"] = f"http://127.0.0.1:{args.asr_port}/asr"
+        os.environ["NLU_URL"] = f"http://127.0.0.1:{args.nlu_port}/nlu"
+        asr_health_url = f"http://127.0.0.1:{args.asr_port}/health"
+        nlu_health_url = f"http://127.0.0.1:{args.nlu_port}/health"
+
+        asr_proc = multiprocessing.Process(
+            target=_start_asr_server,
+            args=(args.asr_model, args.host, args.asr_port, args.gpu),
+            daemon=True,
+        )
+        asr_proc.start()
+
+        rust_proc = _start_rust_infer(args, inference_config, service_args=["--nlu-only"])
+        CHILD_PROCS[:] = [asr_proc, rust_proc]
+        log.info("Mixed inference: Python ASR PID=%d, Rust NLU PID=%d", asr_proc.pid, rust_proc.pid)
+
+        try:
+            _wait_for_service("ASR", asr_health_url, asr_proc, timeout=args.service_timeout)
+            _wait_for_service("NLU", nlu_health_url, rust_proc, timeout=args.service_timeout)
+
+            if args.hardware_serial:
+                from pipeline.hardware_serial import run_hardware_serial
+                asyncio.run(run_hardware_serial())
+            elif args.onboard:
+                from pipeline.onboard import run_onboard
+                asyncio.run(run_onboard())
+            else:
+                from pipeline.main import run_webrtc
+                asyncio.run(run_webrtc())
+        finally:
+            _cleanup_children("main finally")
+        return
 
     if inference_backend in {"rust", "external"}:
         asr_proc = None
