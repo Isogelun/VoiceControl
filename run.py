@@ -19,8 +19,6 @@ import logging
 import os
 import signal
 import socket
-import stat
-import subprocess
 import sys
 import multiprocessing
 import threading
@@ -40,7 +38,6 @@ DEFAULT_CONFIG_PATH = os.path.join(PROJECT_ROOT, "config.yaml")
 DEFAULT_SERVICE_TIMEOUT = float(os.environ.get("SERVICE_START_TIMEOUT", "120"))
 CHILD_PROCS = []
 _CLEANING_UP = False
-RUST_BINARY_NAMES = ("voice-infer.exe", "voice-infer")
 
 CONFIG_ENV_MAP = {
     ("robot", "ip"): "UNITREE_ROBOT_IP",
@@ -238,25 +235,15 @@ def _apply_config_env(config):
 
 
 def _proc_alive(proc):
-    if isinstance(proc, subprocess.Popen):
-        return proc.poll() is None
     return proc.is_alive()
 
 
 def _proc_exitcode(proc):
-    if isinstance(proc, subprocess.Popen):
-        return proc.poll()
     return proc.exitcode
 
 
 def _proc_wait(proc, timeout):
-    if isinstance(proc, subprocess.Popen):
-        try:
-            proc.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            pass
-    else:
-        proc.join(timeout=timeout)
+    proc.join(timeout=timeout)
 
 
 def _cleanup_children(reason="exit"):
@@ -335,94 +322,6 @@ def _start_nlu_server(model_dir, tokenizer_dir, host, port, use_gpu=False):
     tokenizer = load_tokenizer(tokenizer_dir)
     enc_sess, dec_sess = load_sessions(model_dir, use_gpu=use_gpu)
     run_serve(enc_sess, dec_sess, tokenizer, host, port)
-
-
-def _find_rust_binary(configured_path=None):
-    candidates = []
-    if configured_path:
-        candidates.append(_project_path(configured_path))
-
-    for binary_name in RUST_BINARY_NAMES:
-        candidates.append(os.path.join(PROJECT_ROOT, "rust", binary_name))
-
-    dist_dir = os.path.join(PROJECT_ROOT, "dist")
-    if os.path.isdir(dist_dir):
-        for name in sorted(os.listdir(dist_dir)):
-            if name.startswith("voice-infer-ubuntu2204-"):
-                for binary_name in RUST_BINARY_NAMES:
-                    candidates.append(os.path.join(dist_dir, name, binary_name))
-
-    for profile in ("release", "debug"):
-        for binary_name in RUST_BINARY_NAMES:
-            candidates.append(os.path.join(PROJECT_ROOT, "voice-infer", "target", profile, binary_name))
-
-    for path in candidates:
-        if path and os.path.isfile(path):
-            return path
-
-    raise RuntimeError(
-        "Rust backend selected but voice-infer binary was not found. "
-        "Build it with `cd voice-infer && cargo build --release`, "
-        "or set inference.rust_binary in config.yaml."
-    )
-
-
-def _start_rust_infer(args, inference_config, service_args=None):
-    binary = _find_rust_binary(inference_config.get("rust_binary"))
-    if os.name != "nt" and not os.access(binary, os.X_OK):
-        os.chmod(binary, os.stat(binary).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-    env = os.environ.copy()
-
-    detected_ort = None
-    rust_dir = os.path.join(PROJECT_ROOT, "rust")
-    if os.path.isdir(rust_dir):
-        ort_candidates = sorted(
-            os.path.join(rust_dir, name)
-            for name in os.listdir(rust_dir)
-            if name.startswith("libonnxruntime.so.")
-        )
-        if ort_candidates:
-            detected_ort = ort_candidates[-1]
-
-    ort_dylib = inference_config.get("rust_ort_dylib")
-    if ort_dylib:
-        env["ORT_DYLIB_PATH"] = _project_path(ort_dylib)
-    elif detected_ort:
-        env["ORT_DYLIB_PATH"] = detected_ort
-    elif env.get("ORT_DYLIB_PATH") and not os.path.isfile(env["ORT_DYLIB_PATH"]):
-        env.pop("ORT_DYLIB_PATH", None)
-
-    if env.get("ORT_DYLIB_PATH") and not os.path.isfile(env["ORT_DYLIB_PATH"]):
-        raise RuntimeError(f"ORT_DYLIB_PATH points to a missing file: {env['ORT_DYLIB_PATH']}")
-
-    ort_opt = inference_config.get("rust_ort_opt")
-    if ort_opt:
-        env["VOICE_INFER_ORT_OPT"] = str(ort_opt)
-
-    max_new_tokens = inference_config.get("rust_asr_max_new_tokens")
-    if max_new_tokens is not None:
-        env["QWEN_ASR_MAX_NEW_TOKENS"] = str(max_new_tokens)
-
-    threads = inference_config.get("rust_threads")
-
-    cmd = [
-        binary,
-        "--asr-model-dir", args.asr_model,
-        "--nlu-model-dir", args.nlu_model,
-        "--nlu-tokenizer-dir", args.nlu_tokenizer,
-        "--host", args.host,
-        "--asr-port", str(args.asr_port),
-        "--nlu-port", str(args.nlu_port),
-    ]
-    if threads is not None:
-        cmd.extend(["--threads", str(threads)])
-    if service_args:
-        cmd.extend(service_args)
-    if args.gpu:
-        cmd.append("--gpu")
-
-    log.info("Starting Rust voice-infer: %s", " ".join(cmd))
-    return subprocess.Popen(cmd, cwd=PROJECT_ROOT, env=env)
 
 
 def _wait_for_service(name, health_url, proc, timeout=DEFAULT_SERVICE_TIMEOUT, interval=0.5):
@@ -579,8 +478,8 @@ def main():
     inference_config = _cfg(config, "inference", default={}) or {}
     models_config = _cfg(config, "models", default={}) or {}
     inference_backend = str(inference_config.get("backend", "python")).lower()
-    if inference_backend not in {"python", "rust", "mixed", "external"}:
-        raise RuntimeError("inference.backend must be one of: python, rust, mixed, external")
+    if inference_backend not in {"python", "external"}:
+        raise RuntimeError("inference.backend must be one of: python, external")
     audio_source = str(_cfg(config, "audio", "source", default="onboard")).lower()
     if args.onboard:
         audio_source = "onboard"
@@ -663,73 +562,19 @@ def main():
     if args.webrtc and not args.skip_preflight and not _preflight_webrtc(args):
         raise SystemExit(2)
 
-    if inference_backend == "mixed":
-        _ensure_port_available("ASR", args.host, args.asr_port)
-        _ensure_port_available("NLU", args.host, args.nlu_port)
-
-        os.environ["ASR_URL"] = f"http://127.0.0.1:{args.asr_port}/asr"
-        os.environ["NLU_URL"] = f"http://127.0.0.1:{args.nlu_port}/nlu"
-        asr_health_url = f"http://127.0.0.1:{args.asr_port}/health"
-        nlu_health_url = f"http://127.0.0.1:{args.nlu_port}/health"
-
-        asr_proc = multiprocessing.Process(
-            target=_start_asr_server,
-            args=(args.asr_model, args.host, args.asr_port, args.gpu),
-            daemon=True,
-        )
-        asr_proc.start()
-
-        rust_proc = _start_rust_infer(args, inference_config, service_args=["--nlu-only"])
-        CHILD_PROCS[:] = [asr_proc, rust_proc]
-        log.info("Mixed inference: Python ASR PID=%d, Rust NLU PID=%d", asr_proc.pid, rust_proc.pid)
-
+    if inference_backend == "external":
+        asr_url = os.environ.get("ASR_URL") or _cfg(config, "services", "asr_url")
+        nlu_url = os.environ.get("NLU_URL") or _cfg(config, "services", "nlu_url")
+        if not asr_url or not nlu_url:
+            raise RuntimeError("external inference backend requires services.asr_url and services.nlu_url")
+        os.environ["ASR_URL"] = asr_url
+        os.environ["NLU_URL"] = nlu_url
+        asr_health_url = asr_url.rsplit("/", 1)[0] + "/health"
+        nlu_health_url = nlu_url.rsplit("/", 1)[0] + "/health"
+        log.info("Using external inference services: ASR=%s NLU=%s", asr_url, nlu_url)
         try:
-            _wait_for_service("ASR", asr_health_url, asr_proc, timeout=args.service_timeout)
-            _wait_for_service("NLU", nlu_health_url, rust_proc, timeout=args.service_timeout)
-
-            if args.hardware_serial:
-                from pipeline.hardware_serial import run_hardware_serial
-                asyncio.run(run_hardware_serial())
-            elif args.onboard:
-                from pipeline.onboard import run_onboard
-                asyncio.run(run_onboard())
-            else:
-                from pipeline.main import run_webrtc
-                asyncio.run(run_webrtc())
-        finally:
-            _cleanup_children("main finally")
-        return
-
-    if inference_backend in {"rust", "external"}:
-        asr_proc = None
-        nlu_proc = None
-
-        if inference_backend == "external":
-            asr_url = os.environ.get("ASR_URL") or _cfg(config, "services", "asr_url")
-            nlu_url = os.environ.get("NLU_URL") or _cfg(config, "services", "nlu_url")
-            if not asr_url or not nlu_url:
-                raise RuntimeError("external inference backend requires services.asr_url and services.nlu_url")
-            os.environ["ASR_URL"] = asr_url
-            os.environ["NLU_URL"] = nlu_url
-            asr_health_url = asr_url.rsplit("/", 1)[0] + "/health"
-            nlu_health_url = nlu_url.rsplit("/", 1)[0] + "/health"
-            log.info("Using external inference services: ASR=%s NLU=%s", asr_url, nlu_url)
-        else:
-            _ensure_port_available("ASR", args.host, args.asr_port)
-            _ensure_port_available("NLU", args.host, args.nlu_port)
-            os.environ["ASR_URL"] = f"http://127.0.0.1:{args.asr_port}/asr"
-            os.environ["NLU_URL"] = f"http://127.0.0.1:{args.nlu_port}/nlu"
-            asr_health_url = f"http://127.0.0.1:{args.asr_port}/health"
-            nlu_health_url = f"http://127.0.0.1:{args.nlu_port}/health"
-            rust_proc = _start_rust_infer(args, inference_config)
-            CHILD_PROCS[:] = [rust_proc]
-            asr_proc = rust_proc
-            nlu_proc = rust_proc
-            log.info("Rust voice-infer PID=%d (ASR port %d, NLU port %d)", rust_proc.pid, args.asr_port, args.nlu_port)
-
-        try:
-            _wait_for_service("ASR", asr_health_url, asr_proc, timeout=args.service_timeout)
-            _wait_for_service("NLU", nlu_health_url, nlu_proc, timeout=args.service_timeout)
+            _wait_for_service("ASR", asr_health_url, None, timeout=args.service_timeout)
+            _wait_for_service("NLU", nlu_health_url, None, timeout=args.service_timeout)
 
             if args.hardware_serial:
                 from pipeline.hardware_serial import run_hardware_serial

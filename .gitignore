@@ -14,9 +14,8 @@ build/
 .venv/
 venv/
 
-# Rust/native build artifacts
+# Native build artifacts
 target/
-voice-infer/target/
 *.pdb
 
 # Runtime outputs
@@ -29,7 +28,6 @@ logs/
 
 # Keep small audio fixtures for reproducible tests
 !tests/fixtures/**/*.wav
-!voice-infer/tests/resources/**/*.wav
 
 # Local scratch files
 test(1).py

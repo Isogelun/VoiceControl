@@ -1,150 +1,132 @@
-﻿# VoiceControl
+# VoiceControl
 
-闈㈠悜瀹囨爲 Go2 鏈哄櫒鐙楃殑璇煶鎺у埗绯荤粺銆?
+VoiceControl 是面向 Unitree Go2 的语音控制项目，流程如下：
+
 ```text
-鍞ら啋璇?-> VAD 璇煶鍒囧垎 -> ASR 璇煶璇嗗埆 -> NLU 鎰忓浘鐞嗚В -> 鎸囦护 JSON -> 鏈哄櫒鐙楀姩浣?璇煶鍙嶉
+唤醒词/语音输入 -> VAD -> ASR -> NLU -> 指令 JSON -> 机器狗动作/语音反馈
 ```
 
-椤圭洰鐜板湪淇濈暀涓ゅ鎺ㄧ悊鍚庣锛?
-- `python`锛氬師濮?Python ASR/NLU 鏈嶅姟锛岄€傚悎寮€鍙戣皟璇曘€?- `rust`锛歚voice-infer/` Rust ASR/NLU 鏈嶅姟锛岄€傚悎 Ubuntu 22.04 鐪熸満閮ㄧ讲銆?
-绗竴娆℃嬁鍒颁唬鐮侊紝璇峰厛鐪嬶細
+当前仓库只保留 Python 运行链路。之前的 Rust `voice-infer` 路线已经移除，原因是真机 aarch64 环境上 ONNX Runtime 会在初始化或建 session 阶段崩溃，Rust 与 Python ORT 都受影响。
 
-- [docs/getting-started.md](docs/getting-started.md)锛氱幆澧冨噯澶囥€佹ā鍨嬫斁缃€乄indows 鎵撳寘銆佺湡鏈洪儴缃插畬鏁存祦绋嬨€?- [docs/robot-production-deploy.md](docs/robot-production-deploy.md)锛歎buntu 22.04 鐪熸満鐢熶骇閮ㄧ讲銆乻ystemd銆佹棩蹇楀拰鏁呴殰鎺掓煡銆?- [docs/ubuntu2204-rust-deploy.md](docs/ubuntu2204-rust-deploy.md)锛歎buntu 22.04 Rust 鏈嶅姟閮ㄧ讲缁嗚妭銆?- [voice-infer/README.md](voice-infer/README.md)锛歊ust 鎺ㄧ悊鏈嶅姟鎺ュ彛鍜屾祴璇曡鏄庛€?
-## 褰撳墠鐘舵€?
-- Python 鍏ㄩ摼璺粛鍙繍琛屻€?- Rust `voice-infer` 榛樿娴嬭瘯閫氳繃锛岀湡瀹?ONNX Runtime 鎺ㄧ悊宸插湪 Windows 鏈湴鍜?aarch64 浜ゅ弶缂栬瘧璺緞楠岃瘉銆?- Windows 鍙€氳繃 `scripts/build_robot_deploy_bundle.bat` 涓€閿敓鎴愮湡鏈洪儴缃插寘銆?- 澶фā鍨嬨€丱NNX Runtime 涓嬭浇鍖呫€佽櫄鎷熺幆澧冨拰缂栬瘧浜х墿涓嶆彁浜ゅ埌 Git銆?
-## 鐩綍缁撴瀯
+## 当前后端
+
+`config.yaml` 通过 `inference.backend` 选择推理方式：
+
+```yaml
+inference:
+  backend: python    # python / external
+```
+
+- `python`：`run.py` 在本机启动 Python ASR/NLU 服务，再启动 pipeline。
+- `external`：`run.py` 不启动 ASR/NLU，只连接 `services.asr_url` 和 `services.nlu_url`，适合让机器狗只跑控制链路，推理放到上位机。
+
+## 目录结构
 
 ```text
 VoiceControl/
-鈹溾攢鈹€ run.py                         # 缁熶竴鍚姩鍏ュ彛
-鈹溾攢鈹€ config.yaml                    # 榛樿閰嶇疆
-鈹溾攢鈹€ asr/                           # Python ASR
-鈹溾攢鈹€ nlu/                           # Python NLU
-鈹溾攢鈹€ pipeline/                      # 鍞ら啋銆乂AD銆丄SR/NLU 瀹㈡埛绔€佸姩浣滃垎鍙?鈹溾攢鈹€ unitree_webrtc_connect/        # Unitree Go2 WebRTC 鎺ュ叆
-鈹溾攢鈹€ voice-infer/                   # Rust ASR/NLU 鎺ㄧ悊鏈嶅姟
-鈹溾攢鈹€ scripts/                       # 鎵撳寘銆侀儴缃层€侀獙璇佽剼鏈?鈹溾攢鈹€ docs/                          # 椤圭洰鏂囨。
-鈹溾攢鈹€ tests/                         # 娴嬭瘯涓庡弬鑰冩暟鎹?鈹溾攢鈹€ audio/                         # 鍙嶉闊抽
-鈹斺攢鈹€ models/                        # 鏈湴妯″瀷鐩綍锛屼笉鍏ュ簱
+├── run.py                         # 统一启动入口
+├── config.yaml                    # 默认配置
+├── asr/                           # Python ASR 服务
+├── nlu/                           # Python NLU 服务
+├── pipeline/                      # 唤醒、VAD、ASR/NLU 客户端、动作分发
+├── unitree_webrtc_connect/        # Unitree Go2 WebRTC 接入
+├── scripts/                       # 打包、部署、麦克风/扬声器工具
+├── docs/                          # 项目文档
+├── tests/                         # Python 测试
+├── audio/                         # 反馈音频
+└── models/                        # 本地模型目录，不入库
 ```
 
-## 蹇€熼儴缃?
-Windows 寮€鍙戞満涓婂畨瑁?Rust銆乑ig銆乣cargo-zigbuild` 鍚庯紝鐩存帴杩愯锛?
-```powershell
-scripts\build_robot_deploy_bundle.bat
-```
+## 快速开始
 
-榛樿鐢熸垚 `aarch64 Ubuntu 22.04` 鐪熸満閮ㄧ讲鍖咃細
-
-```text
-dist/robot-deploy-aarch64-<timestamp>/
-```
-
-鎶婅鐩綍鎷峰埌鏈哄櫒鐙楁垨 Ubuntu 22.04 閮ㄧ讲鏈哄悗杩愯锛?
-```bash
-cd robot-deploy-aarch64-*
-chmod +x scripts/install_robot_target.sh
-scripts/install_robot_target.sh --mode webrtc
-```
-
-瀹夎瀹屾垚鍚庝細鐢熸垚 `start_robot.sh`锛?
-```bash
-./start_robot.sh
-```
-
-濡傛灉瑕佸畨瑁呭埌 `/opt/voice-control` 骞舵敞鍐?systemd锛?
-```bash
-sudo -E scripts/install_robot_target.sh --install-dir /opt/voice-control --mode webrtc --systemd
-```
-
-涔熷彲浠ヤ笉瀹夎锛岀洿鎺ヨ繍琛?Python 鎵樼 Rust 鐨勫叆鍙ｏ細
-
-```bash
-chmod +x start_python_managed_rust.sh
-./start_python_managed_rust.sh --webrtc
-```
-
-濡傛灉浣跨敤鏈満楹﹀厠椋庯細
-
-```bash
-./start_python_managed_rust.sh --onboard
-```
-
-濡傛灉浣跨敤涓插彛楹﹀厠椋庨樀鍒楋細
-
-```bash
-./start_python_managed_rust.sh --hardware-serial
-```
-
-鏇村鍑嗗姝ラ鍜屾帓閿欒 [docs/getting-started.md](docs/getting-started.md)銆?
-## 鎺ㄧ悊鍚庣閫夋嫨
-
-`config.yaml` 涓娇鐢?`inference.backend` 鍒囨崲锛?
-```yaml
-inference:
-  backend: mixed    # python / rust / mixed / external
-```
-
-- `python`锛歚run.py` 鍚姩 Python ASR/NLU 鏈嶅姟銆?- `rust`锛歚run.py` 鍚姩 Rust `voice-infer` 鏈嶅姟銆?- `mixed`锛歅ython ASR + Rust NLU銆傚綋鍓?Unitree aarch64 鐪熸満鎺ㄨ崘璇ユā寮忥紝鍥犱负 Rust ASR 鍔犺浇 ASR INT4 ONNX 鏃朵細瑙﹀彂 ONNX Runtime aarch64 宕╂簝銆?- `external`锛歚run.py` 涓嶅惎鍔ㄦ帹鐞嗘湇鍔★紝鍙繛鎺?`services.asr_url` 鍜?`services.nlu_url`锛岄€傚悎 systemd 鍗曠嫭鎵樼 Rust 鏈嶅姟銆?
-## 妯″瀷鐩綍
-
-妯″瀷鏂囦欢闇€瑕佹湰鍦版斁缃紝榛樿缁撴瀯锛?
-```text
-models/
-鈹溾攢鈹€ asr/
-鈹?  鈹溾攢鈹€ encoder.int4.onnx
-鈹?  鈹溾攢鈹€ decoder*
-鈹?  鈹溾攢鈹€ decoder_weights.int4.data
-鈹?  鈹溾攢鈹€ embed_tokens.bin
-鈹?  鈹斺攢鈹€ tokenizer.json
-鈹溾攢鈹€ nlu/
-鈹?  鈹溾攢鈹€ encoder.onnx
-鈹?  鈹溾攢鈹€ decoder.onnx
-鈹?  鈹斺攢鈹€ tokenizer/
-鈹斺攢鈹€ kws/
-    鈹斺攢鈹€ sherpa-onnx wake word models
-```
-
-`models/` 浣撶Н寰堝ぇ锛屽凡琚?`.gitignore` 蹇界暐銆?
-## 甯哥敤鍛戒护
-
-Python 寮€鍙戠幆澧冿細
+安装 Python 依赖：
 
 ```bash
 pip install -e .
+pip install -r requirements-server-py38.txt
+```
+
+启动完整本地链路：
+
+```bash
 python run.py --onboard
 ```
 
-鍙惎鍔?Python 鎺ㄧ悊鏈嶅姟锛?
+只启动服务：
+
 ```bash
 python run.py --serve-asr
 python run.py --serve-nlu
 ```
 
-Rust 鏈湴娴嬭瘯锛?
+只启动 pipeline，连接外部 ASR/NLU：
+
 ```bash
-cd voice-infer
-cargo test
+export ASR_URL=http://<host>:8000/asr
+export NLU_URL=http://<host>:8001/nlu
+python run.py --pipeline-only --webrtc
 ```
 
-Windows 鐢熸垚鐪熸満閮ㄧ讲鍖咃細
+## 模型目录
+
+默认模型路径：
+
+```text
+models/
+├── asr/
+│   ├── encoder.int4.onnx
+│   ├── decoder*
+│   ├── decoder_weights.int4.data
+│   ├── embed_tokens.bin
+│   └── tokenizer.json
+├── nlu/
+│   ├── encoder.onnx
+│   ├── decoder.onnx
+│   └── tokenizer/
+└── kws/
+    └── sherpa-onnx wake word models
+```
+
+`models/` 体积较大，已被 `.gitignore` 忽略，不要直接提交。
+
+## 真机部署
+
+Windows 上生成部署包：
 
 ```powershell
 scripts\build_robot_deploy_bundle.bat
 ```
 
-Windows 浠呬氦鍙夌紪璇?Rust aarch64 鍖咃紝涓嶅寘鍚ā鍨嬶細
+不打包模型：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\cross_build_voice_infer_linux.ps1 -Arch aarch64
+scripts\build_robot_deploy_bundle.bat -NoModels
 ```
 
-## 涓嶈鎻愪氦鐨勫唴瀹?
+在机器狗或 Ubuntu 目标机上：
+
+```bash
+cd <deploy-dir>
+chmod +x scripts/install_robot_target.sh
+scripts/install_robot_target.sh --mode webrtc
+./start_robot.sh
+```
+
+完整部署说明见 [docs/robot-production-deploy.md](docs/robot-production-deploy.md)。
+
+## 测试
+
+```bash
+python -m pytest
+python -m py_compile run.py
+```
+
+## 不要提交的内容
+
 - `models/`
 - `.venv/`
+- `venv/`
 - `third_party/`
-- `voice-infer/target/`
 - `dist/`
 - `output/`
 - `__pycache__/`
-
-濡傛灉闇€瑕佸垎鍙戞ā鍨嬶紝浣跨敤 GitHub Releases銆佸璞″瓨鍌ㄦ垨鍗曠嫭涓嬭浇鑴氭湰锛屼笉瑕佺洿鎺ユ斁杩?Git 浠撳簱銆?

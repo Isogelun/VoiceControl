@@ -18,7 +18,7 @@ Options:
   --install-dir PATH   Install/copy bundle to PATH, e.g. /opt/voice-control.
                        If omitted, deploy in the current directory.
   --mode MODE          Pipeline mode: webrtc, onboard, hardware_serial. Default: webrtc.
-  --systemd            Install and enable systemd services.
+  --systemd            Install and enable systemd service.
   --skip-pip           Do not install Python requirements.
   -h, --help           Show this help.
 
@@ -87,63 +87,51 @@ if [[ -z "$SERVICE_USER" ]]; then
   SERVICE_USER="${SUDO_USER:-$(id -un)}"
 fi
 
-echo "Deploy root: $TARGET_ROOT"
-echo "Pipeline mode: $MODE"
-echo "Service user: $SERVICE_USER"
-
-if [[ ! -x rust/voice-infer ]]; then
-  echo "Missing executable rust/voice-infer. Build/copy the Rust package first." >&2
-  exit 1
-fi
-
-if ! compgen -G "rust/libonnxruntime.so.*" >/dev/null; then
-  echo "Missing rust/libonnxruntime.so.*." >&2
-  exit 1
-fi
-ORT_LIB="$(basename "$(ls rust/libonnxruntime.so.* | sort -V | tail -n 1)")"
-
-if [[ ! -d models/asr && ! -d rust/models/asr ]]; then
-  echo "Missing models/asr or rust/models/asr." >&2
-  exit 1
-fi
-
-if [[ ! -d models/nlu && ! -d rust/models/nlu ]]; then
-  echo "Missing models/nlu or rust/models/nlu." >&2
-  exit 1
-fi
-
-mkdir -p rust/models
-if [[ ! -e rust/models/asr && ! -L rust/models/asr && -d models/asr ]]; then
-  ln -s ../../models/asr rust/models/asr
-elif [[ -L rust/models/asr && ! -e rust/models/asr && -d models/asr ]]; then
-  ln -sf ../../models/asr rust/models/asr
-fi
-if [[ ! -e rust/models/nlu && ! -L rust/models/nlu && -d models/nlu ]]; then
-  ln -s ../../models/nlu rust/models/nlu
-elif [[ -L rust/models/nlu && ! -e rust/models/nlu && -d models/nlu ]]; then
-  ln -sf ../../models/nlu rust/models/nlu
-fi
-
-chmod +x rust/voice-infer rust/start.sh rust/verify.sh 2>/dev/null || true
-chmod +x start_python_managed_rust.sh start_rust_and_pipeline.sh 2>/dev/null || true
-
 if [[ ! -f config.deploy.yaml ]]; then
   cp config.yaml config.deploy.yaml
 fi
 
-if ! grep -q '^inference:' config.deploy.yaml; then
-  cat > config.deploy.yaml.tmp <<EOF
-inference:
-  backend: rust
-  rust_binary: rust/voice-infer
-  rust_ort_dylib: rust/$ORT_LIB
-  rust_ort_opt: disable
-  rust_asr_max_new_tokens: 16
-  rust_threads: 1
+BACKEND="$(
+  awk '
+    /^[[:space:]]*#/ { next }
+    /^inference:[[:space:]]*$/ { in_inference=1; next }
+    /^[^[:space:]][^:]*:/ { if (in_inference) exit }
+    in_inference && /^[[:space:]]*backend:[[:space:]]*/ {
+      sub(/^[[:space:]]*backend:[[:space:]]*/, "")
+      sub(/[[:space:]]*#.*/, "")
+      gsub(/"/, "")
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "")
+      print
+      exit
+    }
+  ' config.deploy.yaml
+)"
+BACKEND="${BACKEND:-python}"
 
-EOF
-  cat config.deploy.yaml >> config.deploy.yaml.tmp
-  mv config.deploy.yaml.tmp config.deploy.yaml
+case "$BACKEND" in
+  python|external) ;;
+  *)
+    echo "Unsupported inference.backend in config.deploy.yaml: $BACKEND" >&2
+    echo "Supported values: python, external" >&2
+    exit 2
+    ;;
+esac
+
+echo "Deploy root: $TARGET_ROOT"
+echo "Pipeline mode: $MODE"
+echo "Inference backend: $BACKEND"
+echo "Service user: $SERVICE_USER"
+
+if [[ "$BACKEND" == "python" ]]; then
+  if [[ ! -d models/asr ]]; then
+    echo "Missing models/asr." >&2
+    exit 1
+  fi
+
+  if [[ ! -d models/nlu ]]; then
+    echo "Missing models/nlu." >&2
+    exit 1
+  fi
 fi
 
 USE_UV=0
@@ -166,13 +154,13 @@ source .venv/bin/activate
 if [[ "$SKIP_PIP" != "1" ]]; then
   if [[ "$USE_UV" == "1" ]]; then
     uv pip install -r requirements-robot.txt
-    if grep -q 'backend: mixed\|backend: python' config.deploy.yaml && [[ -f requirements-server-py38.txt ]]; then
+    if [[ "$BACKEND" == "python" && -f requirements-server-py38.txt ]]; then
       uv pip install -r requirements-server-py38.txt
     fi
   else
     python -m pip install --upgrade pip
     pip install -r requirements-robot.txt
-    if grep -q 'backend: mixed\|backend: python' config.deploy.yaml && [[ -f requirements-server-py38.txt ]]; then
+    if [[ "$BACKEND" == "python" && -f requirements-server-py38.txt ]]; then
       pip install -r requirements-server-py38.txt
     fi
   fi
@@ -197,7 +185,7 @@ if [[ "$SYSTEMD" == "1" ]]; then
 
   $SUDO tee /etc/systemd/system/voice-control.service >/dev/null <<EOF
 [Unit]
-Description=VoiceControl Python-managed Rust service
+Description=VoiceControl service
 After=network-online.target
 Wants=network-online.target
 

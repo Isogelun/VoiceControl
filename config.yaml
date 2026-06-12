@@ -7,11 +7,6 @@ server:
 
 inference:
   backend: python
-  rust_binary: rust/voice-infer
-  rust_ort_dylib: rust/libonnxruntime.so.1.23.0
-  rust_ort_opt: disable
-  rust_asr_max_new_tokens: 16
-  rust_threads: 1
 
 wake:
   backend: asr
