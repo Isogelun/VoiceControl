@@ -1,0 +1,76 @@
+# VoiceControl 完整依赖 (Python 3.8 兼容)
+#
+# 适用场景：在只有 Python 3.8 的环境（如 Jetson Orin / Go2 EDU 机载）上
+# 一键安装全部依赖，支持全量启动（ASR + NLU + Pipeline + WebRTC）。
+#
+# 安装方法:
+#   pip install -r requirements.txt
+#
+# 启动方法 (全量本地链路):
+#   python run.py --onboard
+#   python run.py --webrtc --asr-engine ncnn
+#
+# 仅 ASR/NLU 服务（上位机）:
+#   python run.py --serve-asr
+#   python run.py --serve-nlu
+#
+# 仅 Pipeline（机器狗端，推理服务在别处）:
+#   python run.py --pipeline-only --onboard
+#
+# 注意：Jetson/aarch64 上若 onnxruntime 安装失败，用 1.18.0（PyPI >=1.19 的 wheel
+#       含 cpuid 断言会崩）。aarch64 上 sherpa-ncnn 可能无预编译 wheel。
+
+# ─── 推理引擎：ASR (Qwen3-ASR ONNX, 默认引擎) ───
+onnxruntime>=1.18.0,<=1.19.2    # 1.18+ 支持 INT4+IR10; Jetson aarch64 推荐 1.18.0
+numpy>=1.24.0,<2.0              # 2.0+ 需要 Python 3.9+
+python-speech-features>=0.6     # 纯 Python，MFCC 特征（无限制）
+
+# ─── ASR 分词器 ───
+tokenizers>=0.20.0,<=0.21       # Tokenizer.from_file() 加载 Qwen3-ASR BPE; >=0.20 才能解析当前 tokenizer.json
+
+# ─── NLU ───
+transformers>=4.41.0,<5.0       # AutoTokenizer + T5Tokenizer; >=4.41 兼容 tokenizers>=0.20
+sentencepiece>=0.1.97,<0.3      # T5Tokenizer spiece.model 后备
+
+# ─── 音频处理 ───
+soundfile>=0.12.1,<0.13         # WAV 音频读取（0.13 需要 3.9）
+librosa>=0.10.0,<0.11           # mel 滤波器组 + 重采样（0.11+ 需要 3.9）
+sounddevice>=0.4.6              # 本机麦克风输入流
+webrtcvad>=2.0.10               # WebRTC VAD 静音裁切
+pydub>=0.25.0                   # mp3 反馈音频解码（纯 Python，无限制）
+scipy>=1.10.0,<1.11             # librosa 依赖（1.11+ 需要 3.9）
+
+# ─── 唤醒词 (KWS) ───
+sherpa-onnx==1.10.46            # 支持 Python 3.6+
+
+# ─── Pipeline / 网络 ───
+aiohttp>=3.9.0,<3.10.0          # 3.10+ 不再支持 Python 3.8
+pyyaml>=6.0                     # 配置文件解析
+setuptools>=68.0,<81            # pkg_resources（FastAPI/webrtcvad 依赖）
+
+# ─── 硬件 ───
+pyserial>=3.5                   # 串口唤醒/音频
+pyusb>=1.2.1                    # ReSpeaker 麦克风阵列 USB 控制
+# libusb-package                # 仅 Windows 需要，Jetson 上不要装（无 wheel）
+
+# ─── Unitree Go2 WebRTC ───
+aiortc>=1.9.0,<1.10.0           # 1.10 起放弃 Python 3.8
+requests>=2.28.0,<3.0           # Unitree 云端鉴权/信令
+curl_cffi>=0.6.0,<0.10.0        # TLS 指纹模拟（0.10 起要求 3.9）
+pycryptodome>=3.19.0,<3.22      # AES-128 加解密
+cryptography>=42.0.0,<47.0      # 47.0 起放弃 Python 3.8（46.x 仍支持但有弃用警告）
+packaging>=23.0                 # 版本解析（纯 Python，当前 26.x 仍兼容 3.8）
+wasmtime>=17.0.0,<27.0.0        # 加载 Go2 lidar .wasm（27 起要求 3.9，25 是最后 3.8 版）
+lz4>=4.3.0,<5.0                 # Go2 数据帧解压
+
+# ─── HTTP 服务 (ASR/NLU FastAPI) ───
+fastapi>=0.100.0,<=0.104.1      # 0.104.x = 最后支持 Python 3.8 的版本
+uvicorn>=0.20.0,<0.28           # ASGI 服务器（0.28 起放弃 3.8）
+python-multipart>=0.0.6,<0.1    # FastAPI File/Form 上传依赖
+pydantic>=1.10.0,<2.11          # FastAPI 0.104 数据模型（2.10.6 是最后支持 3.8 的版本；兼容 v1/v2）
+
+# ─── ASR 第二方案 (Sherpa-NCNN, 按需安装) ───
+# sherpa-ncnn 仅在 config.yaml 中 asr.engine=ncnn 时需要。
+# 注意: PyPI 预编译 wheel 可能不支持 Python 3.8 / aarch64，
+#       若 pip install sherpa-ncnn 失败，请回退默认 Qwen3-ASR 引擎。
+# pip install sherpa-ncnn

@@ -34,3 +34,8 @@ pydantic>=1.10.0,<3.0           # FastAPI 数据模型
 
 # ─── 音频处理子依赖 (锁定 3.8 兼容范围) ───
 scipy>=1.10.0,<1.11             # librosa 依赖, 1.11+ 需要 3.9
+
+# ─── ASR 第二方案 (按需安装) ───
+# sherpa-ncnn 仅在 config.yaml 中 asr.engine=ncnn 时需要。
+# 注意: PyPI 预编译 wheel 可能不支持 Python 3.8，若无法安装请使用默认 Qwen3-ASR 引擎。
+# pip install sherpa-ncnn

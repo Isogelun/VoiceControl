@@ -36,14 +36,17 @@ def _providers(use_gpu: bool):
     return ["CPUExecutionProvider"]
 
 
-def _ort_session(path: str, providers, num_threads: int):
+def _ort_session(path: str, providers, num_threads: int, is_int4: bool = True):
     import onnxruntime as ort
 
     opts = ort.SessionOptions()
     opts.intra_op_num_threads = num_threads
     opts.inter_op_num_threads = 1
     opts.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
-    opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+    if is_int4:
+        opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+    else:
+        opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_BASIC
     return ort.InferenceSession(path, sess_options=opts, providers=providers)
 
 
@@ -86,12 +89,15 @@ class Qwen3ASREngine:
         self.max_new_tokens = int(os.environ.get("QWEN_ASR_MAX_NEW_TOKENS", "32"))
         self.fast_mel = os.environ.get("QWEN_ASR_FAST_MEL", "1") not in {"0", "false", "False", "no"}
 
-        self.encoder = _ort_session(os.path.join(model_dir, "encoder" + self.suffix), self.providers, num_threads)
+        is_int4 = self.suffix == ".int4.onnx"
+        self.encoder = _ort_session(
+            os.path.join(model_dir, "encoder" + self.suffix), self.providers, num_threads, is_int4
+        )
         self.decoder_init = _ort_session(
-            os.path.join(model_dir, "decoder_init" + self.suffix), self.providers, num_threads
+            os.path.join(model_dir, "decoder_init" + self.suffix), self.providers, num_threads, is_int4
         )
         self.decoder_step = _ort_session(
-            os.path.join(model_dir, "decoder_step" + self.suffix), self.providers, num_threads
+            os.path.join(model_dir, "decoder_step" + self.suffix), self.providers, num_threads, is_int4
         )
         self.tokenizer = self._load_tokenizer()
         self.embed_tokens = self._load_embeddings()
@@ -99,7 +105,7 @@ class Qwen3ASREngine:
 
         logger.info(
             "Qwen3-ASR model loaded (%s, provider: %s)",
-            "int4" if self.suffix == ".int4.onnx" else "fp32",
+            "int4" if self.suffix == ".int4.onnx" else "fp16/fp32",
             self.providers[0],
         )
 

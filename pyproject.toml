@@ -4,12 +4,14 @@ version = "1.0.0"
 description = "宇树 Go2 EDU 机器狗语音控制系统：唤醒词 → VAD → ASR → NLU → 指令"
 requires-python = ">=3.10,<3.11"
 dependencies = [
-    # ASR
+    # ASR (Qwen3-ASR ONNX, 默认引擎)
     "onnxruntime>=1.23.0,<2",
     "soundfile>=0.13.1",
     "librosa>=0.11.0",
     "numpy>=1.24.0,<3",
     "python-speech-features>=0.6",
+    # ASR 第二方案 (Sherpa-NCNN, 按需安装: pip install sherpa-ncnn)
+    # "sherpa-ncnn",
     # NLU
     "transformers",
     # Pipeline
@@ -37,6 +39,9 @@ dependencies = [
     "uvicorn>=0.20.0",
     "python-multipart>=0.0.9",
 ]
+
+[project.optional-dependencies]
+ncnn = ["sherpa-ncnn"]
 
 [build-system]
 requires = ["setuptools>=68.0"]

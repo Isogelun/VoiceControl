@@ -32,6 +32,7 @@ faulthandler.enable(all_threads=True)
 
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_ASR_MODEL = os.path.join(PROJECT_ROOT, "models", "asr")
+DEFAULT_ASR_NCNN_MODEL = os.path.join(PROJECT_ROOT, "models", "asr_ncnn")
 DEFAULT_NLU_MODEL = os.path.join(PROJECT_ROOT, "models", "nlu")
 DEFAULT_NLU_TOKENIZER = os.path.join(DEFAULT_NLU_MODEL, "tokenizer")
 DEFAULT_CONFIG_PATH = os.path.join(PROJECT_ROOT, "config.yaml")
@@ -64,6 +65,8 @@ CONFIG_ENV_MAP = {
     ("wake", "audio"): "WAKE_AUDIO",
     ("wake", "feedback_enabled"): "WAKE_FEEDBACK_ENABLED",
     ("services", "asr_url"): "ASR_URL",
+    ("asr", "engine"): "ASR_ENGINE",
+    ("asr", "ncnn_model_dir"): "ASR_NCNN_MODEL_DIR",
     ("services", "asr_timeout"): "ASR_TIMEOUT",
     ("services", "asr_retries"): "ASR_RETRIES",
     ("services", "asr_retry_delay_ms"): "ASR_RETRY_DELAY_MS",
@@ -165,6 +168,7 @@ CONFIG_PATH_ENV_NAMES = {
     "COMMAND_SUCCESS_AUDIO",
     "COMMAND_FAILED_AUDIO",
     "COMMAND_UNAVAILABLE_AUDIO",
+    "ASR_NCNN_MODEL_DIR",
 }
 
 
@@ -300,14 +304,25 @@ def _start_parent_watchdog(name):
     threading.Thread(target=_watch_parent, name=f"{name}-parent-watchdog", daemon=True).start()
 
 
-def _start_asr_server(model_dir, host, port, use_gpu):
+def _start_asr_server(model_dir, host, port, use_gpu, engine_name="qwen3"):
     """在子进程中启动 ASR HTTP 服务"""
     _start_parent_watchdog("ASR")
-    from asr.engine import load_session
-    from asr.server import run_serve
-
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [ASR] %(message)s")
-    logging.getLogger("run").info("ASR model: Qwen3-ASR ONNX")
+
+    engine_name = (engine_name or "qwen3").lower()
+    if engine_name == "ncnn":
+        from asr.ncnn_engine import load_session
+        from asr.ncnn_server import run_serve
+
+        logging.getLogger("run").info("ASR model: Sherpa-NCNN (%s)", model_dir)
+    elif engine_name == "qwen3":
+        from asr.engine import load_session
+        from asr.server import run_serve
+
+        logging.getLogger("run").info("ASR model: Qwen3-ASR ONNX")
+    else:
+        raise RuntimeError(f"unsupported asr.engine: {engine_name} (expected qwen3 | ncnn)")
+
     engine = load_session(model_dir, use_gpu=use_gpu)
     run_serve(engine, host, port)
 
@@ -442,6 +457,7 @@ def main():
     audio_mode.add_argument("--hardware-serial", action="store_true", help="硬件串口唤醒/音频模式")
 
     parser.add_argument("--asr-model", default=None, help="ASR 模型目录")
+    parser.add_argument("--asr-engine", default=None, choices=("qwen3", "ncnn"), help="ASR 引擎：qwen3（默认）或 ncnn")
     parser.add_argument("--nlu-model", default=None, help="NLU 模型目录")
     parser.add_argument("--nlu-tokenizer", default=None, help="NLU 分词器目录")
     parser.add_argument("--asr-port", type=int, default=None)
@@ -495,7 +511,20 @@ def main():
     if args.hardware_serial:
         fallback = os.environ.get("HARDWARE_SOFTWARE_WAKE_FALLBACK", "1") not in {"0", "false", "False", "no"}
         os.environ["WAKE_BACKEND"] = "asr" if fallback else "hardware"
-    args.asr_model = _project_path(args.asr_model or models_config.get("asr") or DEFAULT_ASR_MODEL)
+    asr_config = _cfg(config, "asr", default={}) or {}
+    args.asr_engine = args.asr_engine or os.environ.get("ASR_ENGINE", str(asr_config.get("engine", "qwen3"))).lower()
+    if args.asr_engine not in {"qwen3", "ncnn"}:
+        raise RuntimeError(f"asr.engine 只能是 qwen3 或 ncnn，当前值: {args.asr_engine}")
+    # 仅当用户未显式指定 --asr-model / models.asr 时，按 engine 选默认目录：
+    #   ncnn -> models/asr_ncnn，qwen3 -> models/asr
+    explicit_asr_model = args.asr_model or models_config.get("asr")
+    if explicit_asr_model:
+        args.asr_model = _project_path(explicit_asr_model)
+    elif args.asr_engine == "ncnn":
+        ncnn_dir = os.environ.get("ASR_NCNN_MODEL_DIR") or asr_config.get("ncnn_model_dir") or DEFAULT_ASR_NCNN_MODEL
+        args.asr_model = _project_path(ncnn_dir)
+    else:
+        args.asr_model = _project_path(DEFAULT_ASR_MODEL)
     args.nlu_model = _project_path(args.nlu_model or models_config.get("nlu") or DEFAULT_NLU_MODEL)
     args.nlu_tokenizer = _project_path(
         args.nlu_tokenizer or models_config.get("nlu_tokenizer") or DEFAULT_NLU_TOKENIZER
@@ -536,7 +565,7 @@ def main():
 
     # ── 单服务模式 ──────────────────────────────────────────────────────────
     if args.serve_asr:
-        _start_asr_server(args.asr_model, args.host, args.asr_port, args.gpu)
+        _start_asr_server(args.asr_model, args.host, args.asr_port, args.gpu, engine_name=args.asr_engine)
         return
 
     if args.serve_nlu:
@@ -599,7 +628,7 @@ def main():
 
     asr_proc = multiprocessing.Process(
         target=_start_asr_server,
-        args=(args.asr_model, args.host, args.asr_port, args.gpu),
+        args=(args.asr_model, args.host, args.asr_port, args.gpu, args.asr_engine),
         daemon=True,
     )
     nlu_proc = multiprocessing.Process(

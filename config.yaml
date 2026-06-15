@@ -8,6 +8,10 @@ server:
 inference:
   backend: python
 
+asr:
+  engine: ncnn               # qwen3 | ncnn（仅 inference.backend=python 时生效）
+  ncnn_model_dir: models/asr_ncnn  # asr.engine=ncnn 时的模型目录
+
 wake:
   backend: asr
   keyword: 你好曼波
