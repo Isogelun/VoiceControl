@@ -40,7 +40,8 @@ def _load_export_config(model_dir: str) -> dict:
         return {}
 
 
-def load_sessions(model_dir: str, use_gpu: bool = False, num_threads: int = None):
+def load_sessions(model_dir: str, use_gpu: bool = False, num_threads: int = None,
+                   gpu_encoder_only: bool = False):
     """Load encoder/decoder ONNX sessions."""
     if num_threads is None:
         cores = os.cpu_count() or 4
@@ -53,19 +54,35 @@ def load_sessions(model_dir: str, use_gpu: bool = False, num_threads: int = None
     opts.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
     opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
 
+    gpu_mem_limit = int(os.environ.get("ORT_GPU_MEM_LIMIT", "0"))
     if use_gpu and "CUDAExecutionProvider" in ort.get_available_providers():
-        providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+        cuda_opts = {
+            "device_id": 0,
+            "arena_extend_strategy": "kSameAsRequested",
+            "cudnn_conv_algo_search": "DEFAULT",
+        }
+        if gpu_mem_limit > 0:
+            cuda_opts["gpu_mem_limit"] = gpu_mem_limit
+        enc_providers = [("CUDAExecutionProvider", cuda_opts), "CPUExecutionProvider"]
+        if gpu_encoder_only:
+            dec_providers = ["CPUExecutionProvider"]
+            logger.info("NLU GPU encoder-only mode: decoder will run on CPU")
+        else:
+            dec_providers = enc_providers
     else:
-        providers = ["CPUExecutionProvider"]
+        enc_providers = ["CPUExecutionProvider"]
+        dec_providers = ["CPUExecutionProvider"]
         if use_gpu:
             logger.warning("CUDAExecutionProvider unavailable; NLU falling back to CPU")
 
-    enc = ort.InferenceSession(os.path.join(model_dir, "encoder.onnx"), sess_options=opts, providers=providers)
-    dec = ort.InferenceSession(os.path.join(model_dir, "decoder.onnx"), sess_options=opts, providers=providers)
+    enc = ort.InferenceSession(os.path.join(model_dir, "encoder.onnx"), sess_options=opts, providers=enc_providers)
+    dec = ort.InferenceSession(os.path.join(model_dir, "decoder.onnx"), sess_options=opts, providers=dec_providers)
     export_config = _load_export_config(model_dir)
     SESSION_EXPORT_CONFIGS[id(enc)] = export_config
     SESSION_EXPORT_CONFIGS[id(dec)] = export_config
-    logger.info("NLU model loaded (provider: %s)", enc.get_providers()[0])
+    enc_prov = enc.get_providers()[0] if enc.get_providers() else "unknown"
+    dec_prov = dec.get_providers()[0] if dec.get_providers() else "unknown"
+    logger.info("NLU model loaded (encoder: %s, decoder: %s)", enc_prov, dec_prov)
     return enc, dec
 
 

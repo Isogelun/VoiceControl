@@ -19,7 +19,6 @@ import logging
 import os
 import signal
 import socket
-import sys
 import multiprocessing
 import threading
 import time
@@ -80,6 +79,7 @@ CONFIG_ENV_MAP = {
     ("command", "service_url"): "COMMAND_SERVICE_URL",
     ("command", "service_timeout"): "COMMAND_SERVICE_TIMEOUT",
     ("command", "fast_response"): "COMMAND_FAST_RESPONSE",
+    ("command", "pre_stand_on_wake"): "PRE_STAND_ON_WAKE",
     ("command", "move_step_timeout_ms"): "MOVE_STEP_TIMEOUT_MS",
     ("command", "move_default_timeout_ms"): "MOVE_DEFAULT_TIMEOUT_MS",
     ("command", "auto_stand_before_move"): "AUTO_STAND_BEFORE_MOVE",
@@ -304,7 +304,8 @@ def _start_parent_watchdog(name):
     threading.Thread(target=_watch_parent, name=f"{name}-parent-watchdog", daemon=True).start()
 
 
-def _start_asr_server(model_dir, host, port, use_gpu, engine_name="qwen3"):
+def _start_asr_server(model_dir, host, port, use_gpu, engine_name="qwen3",
+                      gpu_encoder_only=False):
     """在子进程中启动 ASR HTTP 服务"""
     _start_parent_watchdog("ASR")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [ASR] %(message)s")
@@ -323,11 +324,12 @@ def _start_asr_server(model_dir, host, port, use_gpu, engine_name="qwen3"):
     else:
         raise RuntimeError(f"unsupported asr.engine: {engine_name} (expected qwen3 | ncnn)")
 
-    engine = load_session(model_dir, use_gpu=use_gpu)
+    engine = load_session(model_dir, use_gpu=use_gpu, gpu_encoder_only=gpu_encoder_only)
     run_serve(engine, host, port)
 
 
-def _start_nlu_server(model_dir, tokenizer_dir, host, port, use_gpu=False):
+def _start_nlu_server(model_dir, tokenizer_dir, host, port, use_gpu=False,
+                      gpu_encoder_only=False):
     """在子进程中启动 NLU HTTP 服务"""
     _start_parent_watchdog("NLU")
     from nlu.engine import load_sessions, load_tokenizer
@@ -335,32 +337,9 @@ def _start_nlu_server(model_dir, tokenizer_dir, host, port, use_gpu=False):
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [NLU] %(message)s")
     tokenizer = load_tokenizer(tokenizer_dir)
-    enc_sess, dec_sess = load_sessions(model_dir, use_gpu=use_gpu)
+    enc_sess, dec_sess = load_sessions(model_dir, use_gpu=use_gpu,
+                                       gpu_encoder_only=gpu_encoder_only)
     run_serve(enc_sess, dec_sess, tokenizer, host, port)
-
-
-def _wait_for_service(name, health_url, proc, timeout=DEFAULT_SERVICE_TIMEOUT, interval=0.5):
-    """等待子进程服务通过健康检查"""
-    deadline = time.time() + timeout
-    next_log = time.time() + 5
-    while time.time() < deadline:
-        if not proc.is_alive():
-            raise RuntimeError(f"{name} 进程已退出，exitcode={proc.exitcode}")
-        try:
-            with urllib_request.urlopen(health_url, timeout=2) as resp:
-                if resp.status == 200:
-                    log.info("%s 健康检查通过: %s", name, health_url)
-                    return
-        except urllib_error.URLError:
-            pass
-        except Exception:
-            log.exception("%s 健康检查异常", name)
-        if time.time() >= next_log:
-            remain = max(0, int(deadline - time.time()))
-            log.info("等待 %s 服务启动中，剩余约 %ss: %s", name, remain, health_url)
-            next_log = time.time() + 5
-        time.sleep(interval)
-    raise TimeoutError(f"{name} 健康检查超时: {health_url}")
 
 
 def _ensure_port_available(name, host, port):
@@ -464,6 +443,8 @@ def main():
     parser.add_argument("--nlu-port", type=int, default=None)
     parser.add_argument("--host", default=None)
     parser.add_argument("--gpu", action="store_true", help="使用 GPU 推理")
+    parser.add_argument("--gpu-encoder-only", action="store_true",
+                        help="仅 encoder 使用 GPU，decoder 保留 CPU（节省显存，适合 Jetson 等小内存设备）")
     parser.add_argument("--preflight-only", action="store_true", help="仅执行启动前连通性检查，不启动 ASR/NLU/Pipeline")
     parser.add_argument("--skip-preflight", action="store_true", help="跳过 WebRTC 连通性预检")
     denoise = parser.add_mutually_exclusive_group()
@@ -533,6 +514,7 @@ def main():
     args.nlu_port = args.nlu_port if args.nlu_port is not None else int(server_config.get("nlu_port", 8001))
     args.host = args.host or server_config.get("host") or "0.0.0.0"
     args.gpu = args.gpu or bool(server_config.get("gpu", False))
+    args.gpu_encoder_only = args.gpu_encoder_only or bool(server_config.get("gpu_encoder_only", False))
     args.service_timeout = (
         args.service_timeout
         if args.service_timeout is not None
@@ -565,11 +547,13 @@ def main():
 
     # ── 单服务模式 ──────────────────────────────────────────────────────────
     if args.serve_asr:
-        _start_asr_server(args.asr_model, args.host, args.asr_port, args.gpu, engine_name=args.asr_engine)
+        _start_asr_server(args.asr_model, args.host, args.asr_port, args.gpu,
+                          engine_name=args.asr_engine, gpu_encoder_only=args.gpu_encoder_only)
         return
 
     if args.serve_nlu:
-        _start_nlu_server(args.nlu_model, args.nlu_tokenizer, args.host, args.nlu_port, args.gpu)
+        _start_nlu_server(args.nlu_model, args.nlu_tokenizer, args.host, args.nlu_port,
+                          args.gpu, gpu_encoder_only=args.gpu_encoder_only)
         return
 
     # ── Pipeline-only 模式 ─────────────────────────────────────────────────
@@ -628,12 +612,14 @@ def main():
 
     asr_proc = multiprocessing.Process(
         target=_start_asr_server,
-        args=(args.asr_model, args.host, args.asr_port, args.gpu, args.asr_engine),
+        args=(args.asr_model, args.host, args.asr_port, args.gpu, args.asr_engine,
+              args.gpu_encoder_only),
         daemon=True,
     )
     nlu_proc = multiprocessing.Process(
         target=_start_nlu_server,
-        args=(args.nlu_model, args.nlu_tokenizer, args.host, args.nlu_port, args.gpu),
+        args=(args.nlu_model, args.nlu_tokenizer, args.host, args.nlu_port, args.gpu,
+              args.gpu_encoder_only),
         daemon=True,
     )
 

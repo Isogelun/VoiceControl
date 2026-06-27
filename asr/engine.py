@@ -25,14 +25,25 @@ logger = logging.getLogger(__name__)
 SAMPLE_RATE = 16000
 
 
-def _providers(use_gpu: bool):
+def _providers(use_gpu: bool, *, gpu_mem_limit: int = 0):
     import onnxruntime as ort
 
     if use_gpu and "CUDAExecutionProvider" in ort.get_available_providers():
         logger.info("Using GPU inference (CUDA)")
-        return ["CUDAExecutionProvider", "CPUExecutionProvider"]
+        cuda_opts = {
+            "device_id": 0,
+            "arena_extend_strategy": "kSameAsRequested",
+            "cudnn_conv_algo_search": "DEFAULT",
+        }
+        if gpu_mem_limit > 0:
+            cuda_opts["gpu_mem_limit"] = gpu_mem_limit
+        return [("CUDAExecutionProvider", cuda_opts), "CPUExecutionProvider"]
     if use_gpu:
         logger.warning("CUDAExecutionProvider is unavailable, falling back to CPU")
+    return ["CPUExecutionProvider"]
+
+
+def _cpu_providers():
     return ["CPUExecutionProvider"]
 
 
@@ -73,7 +84,8 @@ def _validate_model_dir(model_dir: str, suffix: str):
 
 
 class Qwen3ASREngine:
-    def __init__(self, model_dir: str, num_threads: int = None, use_gpu: bool = False):
+    def __init__(self, model_dir: str, num_threads: int = None, use_gpu: bool = False,
+                 gpu_encoder_only: bool = False):
         if num_threads is None:
             cores = os.cpu_count() or 4
             max_threads = int(os.environ.get("QWEN_ASR_MAX_THREADS", "8"))
@@ -83,7 +95,14 @@ class Qwen3ASREngine:
         self.suffix = _model_suffix(model_dir)
         _validate_model_dir(model_dir, self.suffix)
 
-        self.providers = _providers(use_gpu)
+        gpu_mem_limit = int(os.environ.get("ORT_GPU_MEM_LIMIT", "0"))
+        encoder_providers = _providers(use_gpu, gpu_mem_limit=gpu_mem_limit)
+        if use_gpu and gpu_encoder_only:
+            decoder_providers = _cpu_providers()
+            logger.info("GPU encoder-only mode: decoders will run on CPU")
+        else:
+            decoder_providers = encoder_providers
+
         self.config = self._load_config()
         self.special = self.config.get("special_tokens", {})
         self.max_new_tokens = int(os.environ.get("QWEN_ASR_MAX_NEW_TOKENS", "32"))
@@ -91,22 +110,24 @@ class Qwen3ASREngine:
 
         is_int4 = self.suffix == ".int4.onnx"
         self.encoder = _ort_session(
-            os.path.join(model_dir, "encoder" + self.suffix), self.providers, num_threads, is_int4
+            os.path.join(model_dir, "encoder" + self.suffix), encoder_providers, num_threads, is_int4
         )
         self.decoder_init = _ort_session(
-            os.path.join(model_dir, "decoder_init" + self.suffix), self.providers, num_threads, is_int4
+            os.path.join(model_dir, "decoder_init" + self.suffix), decoder_providers, num_threads, is_int4
         )
         self.decoder_step = _ort_session(
-            os.path.join(model_dir, "decoder_step" + self.suffix), self.providers, num_threads, is_int4
+            os.path.join(model_dir, "decoder_step" + self.suffix), decoder_providers, num_threads, is_int4
         )
         self.tokenizer = self._load_tokenizer()
         self.embed_tokens = self._load_embeddings()
         self._init_mel_frontend()
 
+        enc_prov = self.encoder.get_providers()[0] if self.encoder.get_providers() else "unknown"
+        dec_prov = self.decoder_init.get_providers()[0] if self.decoder_init.get_providers() else "unknown"
         logger.info(
-            "Qwen3-ASR model loaded (%s, provider: %s)",
+            "Qwen3-ASR model loaded (%s, encoder: %s, decoder: %s)",
             "int4" if self.suffix == ".int4.onnx" else "fp16/fp32",
-            self.providers[0],
+            enc_prov, dec_prov,
         )
 
     def _load_config(self):
@@ -291,8 +312,10 @@ class Qwen3ASREngine:
         }
 
 
-def load_session(model_dir: str, num_threads: int = None, use_gpu: bool = False):
-    return Qwen3ASREngine(model_dir, num_threads=num_threads, use_gpu=use_gpu)
+def load_session(model_dir: str, num_threads: int = None, use_gpu: bool = False,
+                  gpu_encoder_only: bool = False):
+    return Qwen3ASREngine(model_dir, num_threads=num_threads, use_gpu=use_gpu,
+                          gpu_encoder_only=gpu_encoder_only)
 
 
 def load_audio(source) -> np.ndarray:

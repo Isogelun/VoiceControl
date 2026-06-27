@@ -155,7 +155,7 @@ class CommandDispatcherValidationTests(unittest.TestCase):
             },
         )
 
-    def test_directional_move_can_match_test_py_timing_and_steps(self):
+    def test_directional_move_uses_configured_timing_and_steps(self):
         dispatcher = CommandDispatcher()
         envelope = {
             "command": {

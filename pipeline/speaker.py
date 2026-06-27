@@ -57,10 +57,6 @@ class Speaker:
         await self._cleanup_duplicate_audio(filename, keep_uid=uid, matches=matches)
         log.info("Uploaded and played audio file: %s", path)
 
-    async def _find_audio_uuid(self, name: str):
-        matches = await self._find_audio_matches(name)
-        return self._item_uuid(matches[0]) if matches else None
-
     async def _find_audio_matches(self, name: str):
         return [item for item in await self._get_audio_items() if self._name_matches(item, name)]
 

@@ -24,6 +24,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 COMMAND_OUTPUT_DIR = Path(os.environ.get("COMMAND_OUTPUT_DIR", _PROJECT_ROOT / "output"))
 COMMAND_SERVICE_URL = os.environ.get("COMMAND_SERVICE_URL", "").strip()
 COMMAND_SERVICE_TIMEOUT = float(os.environ.get("COMMAND_SERVICE_TIMEOUT", "5"))
+PRE_STAND_ON_WAKE = os.environ.get("PRE_STAND_ON_WAKE", "1") not in {"0", "false", "False", "no", ""}
 COMMAND_FAST_RESPONSE = os.environ.get("COMMAND_FAST_RESPONSE", "0") not in {"0", "false", "False", "no", ""}
 COMMAND_FEEDBACK_ASYNC = os.environ.get("COMMAND_FEEDBACK_ASYNC", "1") not in {"0", "false", "False", "no", ""}
 MOVE_STEP_TIMEOUT_MS = int(os.environ.get("MOVE_STEP_TIMEOUT_MS", "1200"))
@@ -124,6 +125,22 @@ class CommandDispatcher:
     def __init__(self, speaker=None):
         self.speaker = speaker
         self._service_session = None
+        self._pre_stood = False
+
+    async def pre_stand(self):
+        """Send stand_up during command listening so the robot is ready to move."""
+        if not PRE_STAND_ON_WAKE or not AUTO_STAND_BEFORE_MOVE or not COMMAND_SERVICE_URL:
+            return
+        try:
+            result = await self._post_payload({"command_type": "stand_up", "params": {}})
+            self._pre_stood = self._service_ok(result)
+            if self._pre_stood:
+                log.info("Pre-stand completed (wake phase)")
+            else:
+                log.warning("Pre-stand failed: %s", result.get("body", "")[:200])
+        except Exception:
+            log.debug("Pre-stand error (non-fatal)", exc_info=True)
+            self._pre_stood = False
 
     async def dispatch(
         self,
@@ -135,6 +152,7 @@ class CommandDispatcher:
         envelope = self._make_envelope(command, asr_text, normalized_text, wake_metadata)
 
         if not self._is_actionable(command):
+            self._pre_stood = False
             envelope["status"] = "rejected"
             envelope["reason"] = "unknown_intent"
             self._persist(envelope)
@@ -148,6 +166,7 @@ class CommandDispatcher:
             try:
                 service_result = await self._post_to_service(envelope)
             except Exception as exc:
+                self._pre_stood = False
                 envelope["status"] = "failed"
                 envelope["reason"] = "service_error"
                 envelope["error"] = _describe_error(exc)
@@ -158,6 +177,7 @@ class CommandDispatcher:
 
             envelope["service_result"] = service_result
             if not self._service_ok(service_result):
+                self._pre_stood = False
                 envelope["status"] = "failed"
                 envelope["reason"] = "service_rejected"
                 self._persist(envelope)
@@ -272,7 +292,7 @@ class CommandDispatcher:
         return await self._post_payload(payload)
 
     async def _post_move_sequence(self, payload: dict) -> dict:
-        """按 test.py 的动作顺序发送：stand_up -> move -> 可选原生方向动作。"""
+        """Send move commands as stand_up -> move -> optional native action."""
         native_payload = payload.get(NATIVE_MOVE_PAYLOAD_KEY) if isinstance(payload, dict) else None
         move_payload = self._public_payload(payload)
         if MOVE_FAST_RESPONSE:
@@ -281,8 +301,8 @@ class CommandDispatcher:
         timeout_ms = self._move_timeout_ms(move_payload)
         sequence = []
 
-        # 1. 先站立
-        if AUTO_STAND_BEFORE_MOVE:
+        # 1. 先站立（如果唤醒阶段已预站立则跳过）
+        if AUTO_STAND_BEFORE_MOVE and not self._pre_stood:
             prepare_result = await self._post_payload({"command_type": "stand_up", "params": {}})
             sequence.append(prepare_result)
             if not self._service_ok(prepare_result):
@@ -295,6 +315,9 @@ class CommandDispatcher:
                 }
             if MOVE_PREPARE_DELAY_MS > 0:
                 await asyncio.sleep(MOVE_PREPARE_DELAY_MS / 1000.0)
+        elif self._pre_stood:
+            log.info("Skipping stand_up (pre-stood during wake phase)")
+        self._pre_stood = False
 
         # 2. 发一次 move 命令（服务端自己按 timeout_ms 控制时长）
         log.info("Posting move command (once, timeout=%sms): %s", timeout_ms,

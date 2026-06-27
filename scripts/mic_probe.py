@@ -28,7 +28,7 @@ import sys
 import time
 import wave
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Set, Tuple
+from typing import Iterable, List, Optional, Set, Tuple
 
 DEFAULT_SAMPLE_RATE = 16000
 DEFAULT_BLOCKSIZE = 480

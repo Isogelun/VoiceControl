@@ -45,7 +45,7 @@ microphone:
   device: 0
 
 command:
-  service_url: http://10.10.20.82:8090/api/v1/local/motion
+  service_url: http://192.168.123.18:8090/api/v1/local/motion
   service_timeout: 5.0
   fast_response: false
   move_step_timeout_ms: 600

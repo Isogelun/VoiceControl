@@ -18,10 +18,10 @@ import aiohttp
 log = logging.getLogger(__name__)
 
 ASR_URL = os.environ.get("ASR_URL", "http://localhost:8000/asr")
-ASR_TIMEOUT = float(os.environ.get("ASR_TIMEOUT", "90"))
+ASR_TIMEOUT = float(os.environ.get("ASR_TIMEOUT", "15"))
 # 额外重试次数（总尝试次数 = ASR_RETRIES + 1）。失败时短暂等待后重试，避免单次网络抖动丢整句。
 ASR_RETRIES = max(0, int(os.environ.get("ASR_RETRIES", "1")))
-ASR_RETRY_DELAY_MS = max(0, int(os.environ.get("ASR_RETRY_DELAY_MS", "200")))
+ASR_RETRY_DELAY_MS = max(0, int(os.environ.get("ASR_RETRY_DELAY_MS", "100")))
 PCM_SAMPLE_RATE = 16000
 PCM_CHANNELS = 1
 PCM_SAMPLE_WIDTH = 2

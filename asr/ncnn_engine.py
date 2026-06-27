@@ -24,9 +24,7 @@ import time
 
 import numpy as np
 
-# Reuse the battle-tested WAV/loader from the Qwen3 engine so both backends
-# agree on audio decoding and 16 kHz resampling.
-from .engine import SAMPLE_RATE, load_audio
+from .engine import SAMPLE_RATE
 
 logger = logging.getLogger(__name__)
 
@@ -75,8 +73,11 @@ class SherpaNcnnEngine:
     """Thin wrapper around sherpa_ncnn.Recognizer.
 
     Non-streaming use: feed the whole utterance then call input_finished() and
-    read `.text`. A fresh recognizer per request keeps state clean.
+    read `.text`. Keeps a pool of pre-built recognizers to avoid paying the
+    ncnn init cost on every request.
     """
+
+    _POOL_SIZE = 2
 
     def __init__(self, model_dir: str, num_threads: int = None, use_gpu: bool = False):
         try:
@@ -93,7 +94,6 @@ class SherpaNcnnEngine:
             num_threads = min(max(1, cores - 1), max_threads)
 
         if use_gpu:
-            # ncnn can use Vulkan, but the Python wheel exposes no GPU flag here.
             logger.warning("sherpa-ncnn has no GPU path in this wrapper; running on CPU")
 
         self.model_dir = model_dir
@@ -105,8 +105,6 @@ class SherpaNcnnEngine:
         join_param, join_bin = _find_component(model_dir, "joiner")
         tokens = os.path.join(model_dir, "tokens.txt")
 
-        # Build a template config dict; recreate the recognizer per request to
-        # keep each utterance isolated (transducer streaming state).
         self._recognizer_config = {
             "tokens": tokens,
             "encoder_param": enc_param,
@@ -118,21 +116,28 @@ class SherpaNcnnEngine:
             "num_threads": num_threads,
         }
 
-        # Warm up the recognizer once so the first real request doesn't pay
-        # the ncnn init cost.
         t0 = time.perf_counter()
-        _ = self._new_recognizer()
+        self._pool = [self._build_recognizer() for _ in range(self._POOL_SIZE)]
         logger.info(
-            "Sherpa-NCNN model loaded from %s (warmup %.0fms, %d threads)",
+            "Sherpa-NCNN model loaded from %s (warmup %.0fms, %d threads, pool=%d)",
             model_dir,
             (time.perf_counter() - t0) * 1000,
             num_threads,
+            self._POOL_SIZE,
         )
 
-    def _new_recognizer(self):
+    def _build_recognizer(self):
         import sherpa_ncnn
-
         return sherpa_ncnn.Recognizer(**self._recognizer_config)
+
+    def _acquire_recognizer(self):
+        if self._pool:
+            return self._pool.pop()
+        return self._build_recognizer()
+
+    def _release_recognizer(self):
+        if len(self._pool) < self._POOL_SIZE:
+            self._pool.append(self._build_recognizer())
 
     def transcribe(self, wav: np.ndarray, language: str = "auto", use_itn: bool = True) -> dict:
         t0 = time.perf_counter()
@@ -141,14 +146,16 @@ class SherpaNcnnEngine:
         if wav.size == 0:
             return {"text": "", "total_ms": 0.0, "segments": 0}
 
-        recognizer = self._new_recognizer()
-        # sherpa_ncnn expects float32 samples in [-1, 1] at the recognizer's
-        # native sample rate (16 kHz here). load_audio already resamples.
+        recognizer = self._acquire_recognizer()
         recognizer.accept_waveform(SAMPLE_RATE, wav)
         recognizer.input_finished()
         text = (recognizer.text or "").strip()
 
         total_ms = (time.perf_counter() - t0) * 1000
+
+        # sherpa_ncnn.Recognizer has no reset(); replenish pool in background
+        self._release_recognizer()
+
         return {
             "text": text,
             "total_ms": round(total_ms, 1),
@@ -156,7 +163,8 @@ class SherpaNcnnEngine:
         }
 
 
-def load_session(model_dir: str, num_threads: int = None, use_gpu: bool = False):
+def load_session(model_dir: str, num_threads: int = None, use_gpu: bool = False,
+                  gpu_encoder_only: bool = False):
     return SherpaNcnnEngine(model_dir, num_threads=num_threads, use_gpu=use_gpu)
 
 

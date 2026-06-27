@@ -17,8 +17,6 @@ import json
 import math
 import os
 import shutil
-import struct
-import sys
 
 import numpy as np
 import torch

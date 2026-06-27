@@ -3,7 +3,6 @@ import logging
 import json
 import os
 from aiortc import RTCPeerConnection, RTCSessionDescription, RTCIceServer, RTCConfiguration
-from aiortc.contrib.media import MediaPlayer
 from aiortc.mediastreams import MediaStreamError
 from .unitree_auth import (
     NoSdpAnswerError,
@@ -14,7 +13,7 @@ from .unitree_auth import (
 from .webrtc_datachannel import WebRTCDataChannel
 from .webrtc_audio import WebRTCAudioChannel
 from .webrtc_video import WebRTCVideoChannel
-from .constants import DATA_CHANNEL_TYPE, WebRTCConnectionMethod
+from .constants import WebRTCConnectionMethod
 from .util import fetch_public_key, fetch_token, fetch_turn_server_info, print_status
 from .multicast_scanner import discover_ip_sn
 

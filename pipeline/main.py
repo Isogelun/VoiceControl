@@ -74,13 +74,13 @@ COMMAND_VAD_SILENCE_RMS = float(os.environ.get("COMMAND_VAD_SILENCE_RMS", "160")
 COMMAND_VAD_SILENCE_MULTIPLIER = float(os.environ.get("COMMAND_VAD_SILENCE_MULTIPLIER", "1.05"))
 VAD_DEBUG = os.environ.get("VAD_DEBUG", "0") not in {"0", "false", "False", "no", ""}
 VAD_DEBUG_INTERVAL = float(os.environ.get("VAD_DEBUG_INTERVAL", "1.0"))
-SILENCE_TIMEOUT_MS = int(os.environ.get("VAD_SILENCE_TIMEOUT_MS", "1200"))
-COMMAND_SILENCE_TIMEOUT_MS = int(os.environ.get("COMMAND_VAD_SILENCE_TIMEOUT_MS", "360"))
-MIN_SPEECH_MS = int(os.environ.get("VAD_MIN_SPEECH_MS", "240"))
-COMMAND_LISTEN_TIMEOUT_MS = int(os.environ.get("COMMAND_LISTEN_TIMEOUT_MS", "8000"))
-UTTERANCE_PAD_MS = int(os.environ.get("UTTERANCE_PAD_MS", "80"))
+SILENCE_TIMEOUT_MS = int(os.environ.get("VAD_SILENCE_TIMEOUT_MS", "800"))
+COMMAND_SILENCE_TIMEOUT_MS = int(os.environ.get("COMMAND_VAD_SILENCE_TIMEOUT_MS", "240"))
+MIN_SPEECH_MS = int(os.environ.get("VAD_MIN_SPEECH_MS", "200"))
+COMMAND_LISTEN_TIMEOUT_MS = int(os.environ.get("COMMAND_LISTEN_TIMEOUT_MS", "6000"))
+UTTERANCE_PAD_MS = int(os.environ.get("UTTERANCE_PAD_MS", "50"))
 UTTERANCE_TRIM_ENABLED = os.environ.get("UTTERANCE_TRIM_ENABLED", "1") not in {"0", "false", "False", "no", ""}
-UTTERANCE_TRIM_PAD_MS = int(os.environ.get("UTTERANCE_TRIM_PAD_MS", "90"))
+UTTERANCE_TRIM_PAD_MS = int(os.environ.get("UTTERANCE_TRIM_PAD_MS", "60"))
 SILENCE_TIMEOUT_FRAMES = max(1, SILENCE_TIMEOUT_MS // VAD_FRAME_MS)
 COMMAND_SILENCE_TIMEOUT_FRAMES = max(1, COMMAND_SILENCE_TIMEOUT_MS // VAD_FRAME_MS)
 MIN_SPEECH_FRAMES = max(1, MIN_SPEECH_MS // VAD_FRAME_MS)
@@ -677,6 +677,7 @@ class VoicePipeline:
         log.info("已进入命令监听，请说指令")
         if WAKE_FEEDBACK_ENABLED and WAKE_AUDIO:
             asyncio.create_task(self.dispatcher.play_audio(WAKE_AUDIO, success=True))
+        asyncio.create_task(self.dispatcher.pre_stand())
 
     def _with_external_metadata(self, metadata: dict) -> dict:
         out = dict(metadata or {})
